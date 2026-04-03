@@ -775,8 +775,15 @@ def _extract_pdf_text(path: str, check_handwritten: bool = True) -> tuple:
         print("[PDF] No renderer or Tesseract — returning empty for scanned PDF")
         return clean_text(text), 0.0
 
-    # Removed arbitrary psutil memory guard.
-    # Tesseract runs safely in its own isolated subprocess.
+    # Memory guard before starting
+    try:
+        import psutil as _psutil
+        free_mb = _psutil.virtual_memory().available / (1024 * 1024)
+        if free_mb < 300:
+            print(f"[PDF] Only {free_mb:.0f} MB free — skipping OCR")
+            return "", 0.0
+    except Exception:
+        pass
 
     _MAX_PAGES = 10   # up to 10 pages for individual (more thorough than bulk's 2)
     _DPI       = 150  # good quality, less memory than 200 DPI
@@ -805,9 +812,15 @@ def _extract_pdf_text(path: str, check_handwritten: bool = True) -> tuple:
         gc.collect()
 
         for idx, gray_arr in enumerate(page_arrays, start=1):
-            pass
+            try:
+                import psutil as _psutil
+                if _psutil.virtual_memory().available < 250 * 1024 * 1024:
+                    print(f"[PDF] Low memory at page {idx} — stopping")
+                    break
+            except Exception:
+                pass
 
-            text_out = _tess_cli_ocr_page(gray_arr, timeout=45)
+            text_out = _tess_cli_ocr_page(gray_arr, timeout=20)
             gray_arr = None; gc.collect()
 
             if text_out:
@@ -895,7 +908,15 @@ def _extract_pdf_text_bulk(path: str) -> tuple:
         print("[PDF-bulk] Scanned PDF: no renderer or Tesseract — returning empty")
         return "", 0.0
 
-    # Removed up-front memory guard.
+    # Upfront memory guard
+    try:
+        import psutil as _psutil
+        free_mb = _psutil.virtual_memory().available / (1024 * 1024)
+        if free_mb < 300:
+            print(f"[PDF-bulk] Only {free_mb:.0f} MB free — skipping OCR to protect stability")
+            return "", 0.0
+    except Exception:
+        pass
 
     _MAX_PAGES       = 2    # 2 pages is ample for student assignments
     _DPI             = 120  # 120 DPI → ~40% less memory than 200 DPI; Tesseract still accurate
@@ -926,10 +947,18 @@ def _extract_pdf_text_bulk(path: str) -> tuple:
         gc.collect()
 
         for idx, gray_arr in enumerate(page_arrays, start=1):
-            pass
+            # Per-page memory guard
+            try:
+                import psutil as _psutil
+                if _psutil.virtual_memory().available < 250 * 1024 * 1024:
+                    print(f"[PDF-bulk] Low memory at page {idx} — stopping")
+                    gray_arr = None; gc.collect()
+                    break
+            except Exception:
+                pass
 
             # Subprocess OCR — memory-isolated, timeout-protected
-            text_out = _tess_cli_ocr_page(gray_arr, timeout=45)
+            text_out = _tess_cli_ocr_page(gray_arr, timeout=20)
             gray_arr = None; gc.collect()
 
             if text_out:
@@ -972,7 +1001,7 @@ def _extract_image_text(path: str, check_handwritten: bool = True) -> tuple:
         print(f"[Image] Cannot open {path}: {e}")
         return "", 0.0
 
-    text = _tess_cli_ocr_page(gray_arr, timeout=45)
+    text = _tess_cli_ocr_page(gray_arr, timeout=25)
     gray_arr = None; gc.collect()
 
     words = text.split() if text else []
@@ -1093,22 +1122,37 @@ def extract_text_bulk(file_path: str) -> tuple:
 
         elif name.endswith((".png", ".jpg", ".jpeg", ".tiff", ".tif",
                             ".gif", ".webp", ".bmp")):
+            # Images: Tesseract CLI subprocess (memory-isolated)
             try:
-                pil_img = Image.open(file_path)
-                # Cap large images at 2000px to keep memory reasonable
-                w, h = pil_img.size
-                if max(w, h) > 2000:
-                    scale = 2000 / max(w, h)
-                    pil_img = pil_img.resize(
-                        (int(w * scale), int(h * scale)), Image.LANCZOS)
-                gray_arr = np.array(ImageOps.grayscale(pil_img))
-                pil_img = None; gc.collect()
-                
-                text_out = _tess_cli_ocr_page(gray_arr, timeout=45)
-                gray_arr = None; gc.collect()
-                
-                text = clean_text(text_out)
-                conf = 75.0 if text else 0.0
+                import psutil as _psutil
+                if _psutil.virtual_memory().available < 300 * 1024 * 1024:
+                    print("[extract_text_bulk] Low memory — skipping image OCR")
+                else:
+                    pil_img = Image.open(file_path)
+                    # Cap large images at 2000px to keep memory reasonable
+                    w, h = pil_img.size
+                    if max(w, h) > 2000:
+                        scale = 2000 / max(w, h)
+                        pil_img = pil_img.resize(
+                            (int(w * scale), int(h * scale)), Image.LANCZOS)
+                    gray_arr = np.array(ImageOps.grayscale(pil_img))
+                    pil_img = None; gc.collect()
+                    text_out = _tess_cli_ocr_page(gray_arr, timeout=20)
+                    gray_arr = None; gc.collect()
+                    text = clean_text(text_out)
+                    conf = 75.0 if text else 0.0
+            except ImportError:
+                # psutil not installed — run without guard
+                try:
+                    pil_img = Image.open(file_path)
+                    gray_arr = np.array(ImageOps.grayscale(pil_img))
+                    pil_img = None; gc.collect()
+                    text_out = _tess_cli_ocr_page(gray_arr, timeout=20)
+                    gray_arr = None; gc.collect()
+                    text = clean_text(text_out)
+                    conf = 75.0 if text else 0.0
+                except Exception as e:
+                    print(f"[extract_text_bulk] Image OCR: {e}")
             except Exception as e:
                 print(f"[extract_text_bulk] Image OCR error: {e}")
 
