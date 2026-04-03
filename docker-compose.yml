@@ -1,0 +1,51 @@
+# Docker Compose — local development + production parity
+# Usage:  docker compose up --build
+# Env:    copy .env.example → .env and fill in secrets before running
+
+services:
+
+  # ── Flask / Gunicorn application ──────────────────────────────────────────
+  web:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    environment:
+      # Override DATABASE_URL to point to the postgres service below
+      DATABASE_URL: postgresql://scholaris:${POSTGRES_PASSWORD}@db:5432/scholaris
+    volumes:
+      # Persist uploaded files outside the container
+      - uploads:/app/static/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - scholaris_net
+
+  # ── PostgreSQL database ───────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: scholaris
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: scholaris
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scholaris"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - scholaris_net
+
+volumes:
+  pgdata:
+  uploads:
+
+networks:
+  scholaris_net:
+    driver: bridge
