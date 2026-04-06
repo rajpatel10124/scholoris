@@ -188,6 +188,12 @@ with app.app_context():
         raw_conn = psycopg2.connect(app.config['SQLALCHEMY_DATABASE_URI'])
         raw_conn.autocommit = True
         with raw_conn.cursor() as cur:
+            # 1. Update User password length for scrypt hashes
+            try:
+                cur.execute('ALTER TABLE "user" ALTER COLUMN password TYPE VARCHAR(255)')
+            except Exception: pass
+
+            # 2. Add progress tracking columns to bulk_check_run
             for col, dtype in [('processed_count','INT'),('status','VARCHAR(20)'),('accepted','INT'),('rejected','INT'),('manual_review','INT'),('elapsed_sec','FLOAT')]:
                 try:
                     cur.execute(f"ALTER TABLE bulk_check_run ADD COLUMN IF NOT EXISTS {col} {dtype}")
