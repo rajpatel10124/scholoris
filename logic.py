@@ -918,9 +918,9 @@ def _extract_pdf_text_bulk(path: str) -> tuple:
     except Exception:
         pass
 
-    _MAX_PAGES       = 2    # 2 pages is ample for student assignments
-    _DPI             = 120  # 120 DPI → ~40% less memory than 200 DPI; Tesseract still accurate
-    _EARLY_EXIT_WDS  = 150  # stop early once we have enough comparison text
+    _MAX_PAGES       = 1    # 1 page for SUPER FAST bulk checks (demo-ready)
+    _DPI             = 90   # 90 DPI → Much faster rendering, saves memory
+    _EARLY_EXIT_WDS  = 100  # Exit as soon as we have enough comparison text
 
     print(f"[PDF-bulk] Scanned — rendering ≤{_MAX_PAGES} pages @ {_DPI} DPI via subprocess OCR…")
     page_texts, page_confs = [], []

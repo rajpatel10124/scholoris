@@ -1469,13 +1469,14 @@ def bulk_check(course_id, assignment_id):
         with ThreadPoolExecutor(max_workers=_workers) as pool:
             futures = {pool.submit(_extract_one, p): p for p in filtered_paths}
             for fut in as_completed(futures):
+                p_current = futures[fut]
                 try:
                     path, result = fut.result()
                     extracted[path] = result
+                    print(f"   ↳ Progress: Extracted {os.path.basename(path)}", flush=True)
                 except Exception as e:
-                    p = futures[fut]
-                    print(f"[Bulk] Extraction failed {os.path.basename(p)}: {e}")
-                    extracted[p] = ("", None, None, 0.0)
+                    print(f"   ↳ [ERROR] Extraction failed {os.path.basename(p_current)}: {e}", flush=True)
+                    extracted[p_current] = ("", 0.0)
 
         t_extract = time.time()
         print(f"[Bulk] Phase 1 — extracted {len(extracted)} files in {t_extract - t0:.1f}s")
