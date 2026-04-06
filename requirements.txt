@@ -187,5 +187,6 @@ Flask-Mail==0.10.0
 boto3==1.34.0
 flask-socketio
 gevent
+gevent-websocket
 langdetect
 googletrans-py

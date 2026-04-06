@@ -1,4 +1,6 @@
-  
+import os
+os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
+
 """
 logic.py — Plagiarism Detection Engine
 =======================================
@@ -41,7 +43,7 @@ from PIL import Image, ImageOps, ImageFilter, ImageEnhance
 # ── Tesseract (baseline, always try first) ────────────────────────────────────
 try:
     import pytesseract
-    pytesseract.get_tesseract_version()
+    # Version check is now lazy-loaded to prevent startup lag
     _HAS_TESS = True
 except Exception:
     _HAS_TESS = False
