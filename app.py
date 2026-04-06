@@ -14,6 +14,8 @@ TOTAL STABILITY RESTORATION (Standard Sync Mode)
 ================================================
 """
 
+from models import db, User, Course, Assignment, Submission, BulkCheckRun, BulkCheckResult
+
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'scholaris-secret-key-12345')
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'sqlite:///scholaris.db')
@@ -21,12 +23,12 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['UPLOAD_FOLDER'] = os.path.join(app.root_path, 'static', 'uploads')
 app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024  # 1 GB
 
-db = SQLAlchemy(app)
+db.init_app(app)
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
 
 # --- MODELS ---
-from models import User, Course, Assignment, Submission, BulkCheckRun, BulkCheckResult
+# Handled in top-level import to avoid circular dependency errors
 
 @login_manager.user_loader
 def load_user(user_id):
