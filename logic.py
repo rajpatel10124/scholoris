@@ -918,9 +918,9 @@ def _extract_pdf_text_bulk(path: str) -> tuple:
     except Exception:
         pass
 
-    _MAX_PAGES       = 2    # Scan 2 pages to capture cover + content (demo-standard)
-    _DPI             = 130  # 130 DPI → The "sweet spot" for accuracy and speed
-    _EARLY_EXIT_WDS  = 100  # Exit early once we have 100+ words
+    _MAX_PAGES       = 4    # Scan 4 pages to capture more handwriting context
+    _DPI             = 200  # 200 DPI → High resolution for handwriting recognition
+    _EARLY_EXIT_WDS  = 300  # Higher limit for bulk analysis coverage
 
     print(f"[PDF-bulk] Scanned — rendering ≤{_MAX_PAGES} pages @ {_DPI} DPI via subprocess OCR…")
     page_texts, page_confs = [], []
@@ -1664,14 +1664,19 @@ def _bulk_peer_comparison(text, other_submissions, precomputed_embeddings=None):
         if curr_emb is not None and precomputed_embeddings is not None:
             oe = precomputed_embeddings.get(oc)
             sem = float(np.dot(curr_emb, oe)) if oe is not None else _tfidf_similarity(curr_cl, oc)
+        # For noisy OCR/Handwriting, structural/stylometric signals are often zero.
+        # We prioritize the Semantic (meaning) signal if it is high enough.
+        stt = _structural_similarity(text[:3000], ot[:3000])
+        sty = _stylometric_similarity(text[:1500], ot[:1500])
+        
+        # Override: If semantic match is clear (>= 42%), accept regardless of noise in style
+        if sem >= 0.42:
+            fused = sem
         else:
-            sem = _tfidf_similarity(curr_cl, oc)
-        if sem < 0.38:
-            continue
-        stt   = _structural_similarity(text[:3000], ot[:3000])
-        sty   = _stylometric_similarity(text[:1500], ot[:1500])
-        fused = round(sem * 0.60 + stt * 0.32 + sty * 0.08, 4)
-        if fused < 0.38:
+            # Standard fusion with 75% weight on semantic meaning
+            fused = round(sem * 0.75 + stt * 0.15 + sty * 0.10, 4)
+
+        if fused < 0.35:
             continue
         all_matches.append({
             'author': other.get('author_username', 'Unknown'),
