@@ -693,15 +693,24 @@ def dashboard():
 
 
 # =============================================================================
-# ADMIN — USER MANAGEMENT  (stub)
+# ADMIN — USER MANAGEMENT
 # =============================================================================
 @app.route('/admin/users')
 @login_required
 def admin_users():
     if current_user.role != 'admin':
         abort(403)
+    
+    # Get stats for the admin page
+    stats = {
+        'total': User.query.count(),
+        'students': User.query.filter_by(role='student').count(),
+        'faculty': User.query.filter_by(role='faculty').count(),
+        'admins': User.query.filter_by(role='admin').count(),
+    }
+    
     users = User.query.order_by(User.id.desc()).all()
-    return render_template('admin_users.html', users=users)
+    return render_template('admin_users.html', users=users, stats=stats)
 
 
 @app.route('/admin/user/<int:user_id>/toggle', methods=['POST'])
@@ -710,9 +719,35 @@ def admin_toggle_user(user_id):
     if current_user.role != 'admin':
         abort(403)
     user = db.get_or_404(User, user_id)
+    
+    # Prevent self-deactivation
+    if user.id == current_user.id:
+        flash("You cannot deactivate your own account.", "danger")
+        return redirect(url_for('admin_users'))
+        
     user.is_active = not user.is_active
     db.session.commit()
-    flash(f"User {'activated' if user.is_active else 'deactivated'}.", 'info')
+    status = "activated" if user.is_active else "deactivated"
+    flash(f"User '{user.username}' has been {status}.", "info")
+    return redirect(url_for('admin_users'))
+
+
+@app.route('/admin/user/<int:user_id>/delete', methods=['POST'])
+@login_required
+def admin_delete_user(user_id):
+    if current_user.role != 'admin':
+        abort(403)
+    user = db.get_or_404(User, user_id)
+    
+    # Safety Check
+    if user.id == current_user.id:
+        flash("You cannot delete your own account.", "danger")
+        return redirect(url_for('admin_users'))
+
+    username = user.username
+    db.session.delete(user)
+    db.session.commit()
+    flash(f"User '{username}' was permanently deleted.", "success")
     return redirect(url_for('admin_users'))
 
 

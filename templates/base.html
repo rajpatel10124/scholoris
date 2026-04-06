@@ -357,9 +357,8 @@
             {% if current_user.role == 'faculty' %}
                 <a class="nav-pill" href="{{ url_for('create_course') }}">Courses</a>
             {% elif current_user.role == 'admin' %}
-                <a class="nav-pill" href="{{ url_for('admin_users') if 'admin_users' in get_flashed_messages.__module__ else '#' }}">Users</a>
-                <a class="nav-pill" href="#">Reports</a>
-                <a class="nav-pill" href="#">Logs</a>
+                <a class="nav-pill" href="{{ url_for('admin_users') }}">User Management</a>
+                <a class="nav-pill" href="{{ url_for('dashboard') }}">System Stats</a>
             {% endif %}
         </div>
         {% else %}
