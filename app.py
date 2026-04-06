@@ -1028,7 +1028,7 @@ def toggle_publish(assignment_id):
 # =============================================================================
 @app.route('/assignment/<int:assignment_id>/delete', methods=['POST'])
 @login_required
-def delete_assignment(assignment_id):
+def remove_assignment(assignment_id):
     if current_user.role != 'faculty':
         abort(403)
     assign = db.get_or_404(Assignment, assignment_id)

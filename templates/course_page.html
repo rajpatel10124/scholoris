@@ -197,7 +197,7 @@
                                     {{ 'Hide' if assign.is_published else 'Publish' }}
                                 </a>
                                 <form method="POST"
-                                      action="{{ url_for('delete_assignment', assignment_id=assign.id) }}"
+                                      action="{{ url_for('remove_assignment', assignment_id=assign.id) }}"
                                       class="d-inline"
                                       onsubmit="return confirm('Delete assignment &quot;{{ assign.title }}&quot; and ALL its submissions? This cannot be undone.')">
                                     <button type="submit" class="btn-ghost btn-sm" style="color:var(--danger);border-color:rgba(220,38,38,0.3);">
