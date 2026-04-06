@@ -8,6 +8,10 @@ bcrypt = Bcrypt(app)
 
 def seed_database():
     with app.app_context():
+        # DEBUG: Print the actual URI being used
+        uri = app.config.get('SQLALCHEMY_DATABASE_URI')
+        print(f"DEBUG: Connecting to database at: {uri}")
+        
         print("Creating tables if they don't exist in the current database...")
         db.create_all()
 
