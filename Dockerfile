@@ -58,7 +58,7 @@ EXPOSE 5000
 # --workers: 2 × CPU + 1 is the standard formula; 3 is safe for a t3.small
 CMD ["gunicorn", \
      "--bind", "0.0.0.0:5000", \
-     "--workers", "3", \
+     "--workers", "5", \
      "--timeout", "3600", \
      "--log-level", "info", \
      "app:app"]
