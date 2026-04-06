@@ -1661,9 +1661,13 @@ def _bulk_peer_comparison(text, other_submissions, precomputed_embeddings=None):
         if not ot or len(ot.split()) < 10:
             continue
         oc = clean_text(ot)
+        sem = 0.0 # Safety initialization
         if curr_emb is not None and precomputed_embeddings is not None:
             oe = precomputed_embeddings.get(oc)
             sem = float(np.dot(curr_emb, oe)) if oe is not None else _tfidf_similarity(curr_cl, oc)
+        else:
+            sem = _tfidf_similarity(curr_cl, oc)
+
         # For noisy OCR/Handwriting, structural/stylometric signals are often zero.
         # We prioritize the Semantic (meaning) signal if it is high enough.
         stt = _structural_similarity(text[:3000], ot[:3000])
