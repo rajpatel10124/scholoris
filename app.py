@@ -1662,10 +1662,8 @@ def bulk_check(course_id, assignment_id):
             print(f"[Bulk] DB save failed (results still shown): {_db_err}")
             saved_run_id = None
 
-        # Store results in session for CSV/Excel download
-        session_key = f'bulk_check_{course_id}_{assignment_id}'
-        session[session_key] = results
-        session.modified = True
+        # Saved run ID is used for CSV/Excel download instead of session
+        saved_run_id = bulk_run.id
 
         return render_template('bulk_check.html',
                                course=course,
@@ -1693,17 +1691,25 @@ def download_bulk_csv(course_id, assignment_id):
     if assignment.course_id != course.id:
         abort(404)
 
-    # Get results from session first, fallback to URL parameter for backwards compatibility
-    session_key = f'bulk_check_{course_id}_{assignment_id}'
-    results = session.get(session_key, [])
+    run_id = request.args.get('run_id', type=int)
+    results = []
     
-    if not results:
-        # Fallback to URL parameter if session is empty
-        results_json = request.args.get('results', '[]')
-        try:
-            results = json.loads(results_json)
-        except:
-            results = []
+    if run_id:
+        db_results = BulkCheckResult.query.filter_by(run_id=run_id).all()
+        for r in db_results:
+            results.append({
+                'filename': r.filename,
+                'verdict': r.verdict,
+                'reason': r.reason,
+                'peer_score': r.peer_score,
+                'external_score': r.external_score,
+                'ocr_confidence': r.ocr_confidence,
+                'analysis_text': r.analysis_text
+            })
+    else:
+        # Fallback to session for very old unsaved runs
+        session_key = f'bulk_check_{course_id}_{assignment_id}'
+        results = session.get(session_key, [])
 
     output = io.StringIO()
     writer = csv.writer(output)
@@ -1739,17 +1745,24 @@ def download_bulk_excel(course_id, assignment_id):
     if assignment.course_id != course.id:
         abort(404)
 
-    # Get results from session first, fallback to URL parameter for backwards compatibility
-    session_key = f'bulk_check_{course_id}_{assignment_id}'
-    results = session.get(session_key, [])
+    run_id = request.args.get('run_id', type=int)
+    results = []
     
-    if not results:
-        # Fallback to URL parameter if session is empty
-        results_json = request.args.get('results', '[]')
-        try:
-            results = json.loads(results_json)
-        except:
-            results = []
+    if run_id:
+        db_results = BulkCheckResult.query.filter_by(run_id=run_id).all()
+        for r in db_results:
+            results.append({
+                'filename': r.filename,
+                'verdict': r.verdict,
+                'reason': r.reason,
+                'peer_score': r.peer_score,
+                'external_score': r.external_score,
+                'ocr_confidence': r.ocr_confidence,
+                'analysis_text': r.analysis_text
+            })
+    else:
+        session_key = f'bulk_check_{course_id}_{assignment_id}'
+        results = session.get(session_key, [])
 
     output = io.StringIO()
     writer = csv.writer(output)
