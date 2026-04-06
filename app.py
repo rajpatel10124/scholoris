@@ -22,6 +22,10 @@ import os
 import secrets
 import random
 import smtplib
+import time
+import tempfile
+import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 
 # Load .env file explicitly
@@ -35,7 +39,8 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 from flask import (Flask, render_template, redirect, url_for, request,
-                   flash, jsonify, abort, session, Response, send_file)
+                   flash, jsonify, abort, session, Response, send_file, current_app)
+import threading
 from flask_login import (LoginManager, login_user, logout_user,
                          login_required, current_user)
 from flask_bcrypt import Bcrypt
@@ -1566,8 +1571,7 @@ def bulk_check(course_id, assignment_id):
                                 total_files=len(filtered_paths), processed_count=0, status='pending')
         db.session.add(bulk_run); db.session.commit()
 
-        import threading
-        from flask import current_app
+        # Start Background Thread
         threading.Thread(target=run_bulk_check_task, args=(current_app._get_current_object(), bulk_run.id, temp_dir, filtered_paths, assignment.id, course.id, current_user.id), daemon=True).start()
 
         return redirect(url_for('bulk_status', course_id=course_id, assignment_id=assignment_id, run_id=bulk_run.id))
