@@ -1476,7 +1476,7 @@ def bulk_check(course_id, assignment_id):
                     print(f"   ↳ Progress: Extracted {os.path.basename(path)}", flush=True)
                 except Exception as e:
                     print(f"   ↳ [ERROR] Extraction failed {os.path.basename(p_current)}: {e}", flush=True)
-                    extracted[p_current] = ("", 0.0)
+                    extracted[p_current] = ("", None, None, 0.0)
 
         t_extract = time.time()
         print(f"[Bulk] Phase 1 — extracted {len(extracted)} files in {t_extract - t0:.1f}s")

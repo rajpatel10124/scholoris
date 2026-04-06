@@ -918,9 +918,9 @@ def _extract_pdf_text_bulk(path: str) -> tuple:
     except Exception:
         pass
 
-    _MAX_PAGES       = 1    # 1 page for SUPER FAST bulk checks (demo-ready)
-    _DPI             = 90   # 90 DPI → Much faster rendering, saves memory
-    _EARLY_EXIT_WDS  = 100  # Exit as soon as we have enough comparison text
+    _MAX_PAGES       = 2    # Scan 2 pages to capture cover + content (demo-standard)
+    _DPI             = 130  # 130 DPI → The "sweet spot" for accuracy and speed
+    _EARLY_EXIT_WDS  = 100  # Exit early once we have 100+ words
 
     print(f"[PDF-bulk] Scanned — rendering ≤{_MAX_PAGES} pages @ {_DPI} DPI via subprocess OCR…")
     page_texts, page_confs = [], []
