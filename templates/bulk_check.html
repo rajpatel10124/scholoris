@@ -293,8 +293,9 @@ document.getElementById('bulkForm').addEventListener('submit', function (e) {
   let total = [...folder.files].reduce((s, f) => s + f.size, 0);
   if (total > MAX_SIZE) { e.preventDefault(); return; }
   btn.disabled = true;
-  document.getElementById('btnText').textContent = 'Processing…';
-  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>' + btn.innerHTML;
+  const btnTextElem = document.getElementById('btnText');
+  btnTextElem.textContent = 'Uploading & Preparing…';
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>' + btnTextElem.textContent;
 });
 
 document.addEventListener('DOMContentLoaded', () => {

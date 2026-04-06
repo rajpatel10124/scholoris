@@ -1373,9 +1373,11 @@ def view_reports(course_id):
 # =============================================================================
 # FACULTY BULK PLAGIARISM CHECK (BACKGROUND TASK)
 # =============================================================================
-def run_bulk_check_task(app, run_id, temp_dir, filtered_paths, assignment_id, course_id, current_user_id):
+def run_bulk_check_task(app, run_id, temp_dir, assignment_id, course_id, current_user_id):
     """Background task to run bulk plagiarism check."""
-    print(f"[Bulk-BG] Task #{run_id} starting for {len(filtered_paths)} files...", flush=True)
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from sqlalchemy.orm import joinedload
+
     with app.app_context():
         t0 = time.time()
         try:
@@ -1383,8 +1385,43 @@ def run_bulk_check_task(app, run_id, temp_dir, filtered_paths, assignment_id, co
             if not bulk_run: return
             bulk_run.status = 'processing'
             db.session.commit()
-
             assignment = Assignment.query.get(assignment_id)
+            allowed_types = [t.strip().lower() for t in (assignment.allowed_file_types or '').split(',') if t.strip()]
+
+            # --- Phase 0: Extraction (Moved to Background) ---
+            # Extract any ZIPS found in temp_dir
+            for root, _, fs in os.walk(temp_dir):
+                for f in fs:
+                    if f.lower().endswith('.zip'):
+                        zp = os.path.join(root, f)
+                        try:
+                            with zipfile.ZipFile(zp, 'r') as z:
+                                for member in z.namelist():
+                                    if member.endswith('/'): continue
+                                    dest = os.path.normpath(os.path.join(temp_dir, member))
+                                    if not dest.startswith(temp_dir): continue
+                                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                                    with z.open(member) as src, open(dest, 'wb') as dst: dst.write(src.read())
+                            os.remove(zp)
+                        except Exception as e:
+                            print(f"[Bulk-BG] ZIP Extraction Error: {e}", flush=True)
+
+            # Re-scan for full file list
+            filtered_paths = []
+            for root, _, files in os.walk(temp_dir):
+                for f in files:
+                    p = os.path.join(root, f)
+                    ext = f.rsplit('.', 1)[-1].lower() if '.' in f else ''
+                    if not allowed_types or ext in allowed_types:
+                        filtered_paths.append(p)
+            
+            bulk_run.total_files = len(filtered_paths)
+            db.session.commit()
+            print(f"[Bulk-BG] Task #{run_id} starting for {len(filtered_paths)} files...", flush=True)
+
+            if not filtered_paths:
+                bulk_run.status = 'completed'; db.session.commit()
+                return
 
             # --- Phase 1: Text extraction ---
             extracted = {}
@@ -1557,39 +1594,19 @@ def bulk_check(course_id, assignment_id):
 
     temp_dir = tempfile.mkdtemp(prefix=f'bulk_{course_id}_{assignment_id}_')
     try:
-        saved_paths = []
+        # Save ZIP or files to temp_dir
         if upload_zip and upload_zip.filename:
-            zip_path = os.path.join(temp_dir, secure_filename(upload_zip.filename))
-            upload_zip.save(zip_path)
-            with zipfile.ZipFile(zip_path, 'r') as z:
-                for member in z.namelist():
-                    if member.endswith('/'): continue
-                    dest_path = os.path.normpath(os.path.join(temp_dir, member))
-                    if not dest_path.startswith(temp_dir): continue
-                    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-                    with z.open(member) as src, open(dest_path, 'wb') as dst: dst.write(src.read())
-
+            upload_zip.save(os.path.join(temp_dir, secure_filename(upload_zip.filename)))
         for fs in upload_files:
-            if not fs or not fs.filename: continue
-            target = os.path.join(temp_dir, secure_filename(fs.filename))
-            os.makedirs(os.path.dirname(target), exist_ok=True); fs.save(target)
+            if fs and fs.filename:
+                fs.save(os.path.join(temp_dir, secure_filename(fs.filename)))
 
-        for root, _, files in os.walk(temp_dir):
-            for fn in files: saved_paths.append(os.path.join(root, fn))
-
-        allowed_types = [t.strip().lower() for t in (assignment.allowed_file_types or '').split(',') if t.strip()]
-        filtered_paths = [p for p in saved_paths if (not allowed_types or p.rsplit('.', 1)[-1].lower() in allowed_types) and not p.endswith('.zip')]
-
-        if not filtered_paths:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            flash('No allowed files found.', 'danger'); return redirect(request.url)
-
-        bulk_run = BulkCheckRun(assignment_id=assignment.id, course_id=course.id, run_by=current_user.id,
-                                total_files=len(filtered_paths), processed_count=0, status='pending')
+        bulk_run = BulkCheckRun(assignment_id=assignment.id, course_id=course_id, run_by=current_user.id,
+                                total_files=0, processed_count=0, status='pending')
         db.session.add(bulk_run); db.session.commit()
 
-        # Start Background Thread
-        threading.Thread(target=run_bulk_check_task, args=(current_app._get_current_object(), bulk_run.id, temp_dir, filtered_paths, assignment.id, course.id, current_user.id), daemon=True).start()
+        # Start Background Thread (Instant Start)
+        threading.Thread(target=run_bulk_check_task, args=(current_app._get_current_object(), bulk_run.id, temp_dir, assignment.id, course.id, current_user.id), daemon=True).start()
 
         return redirect(url_for('bulk_status', course_id=course_id, assignment_id=assignment_id, run_id=bulk_run.id))
 
