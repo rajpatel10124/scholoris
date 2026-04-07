@@ -14,7 +14,8 @@ Fully aligned with all HTML templates. Covers:
   - Manual review: approve / reject with notes
   - Admin: user list placeholder
 """
-
+import eventlet
+eventlet.monkey_patch()
 import json
 import uuid
 import datetime

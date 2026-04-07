@@ -52,6 +52,9 @@ RUN mkdir -p /app/static/uploads
 # All secrets/config are injected via environment variables at runtime.
 # Do NOT embed .env in the image.
 
+# Speed up PaddleOCR startup by skipping network checks
+ENV PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
+
 EXPOSE 5000
 
 # Run with Gunicorn using Eventlet for real-time WebSockets
