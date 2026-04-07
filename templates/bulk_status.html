@@ -66,11 +66,50 @@
     </div>
 </div>
 
+<!-- Include Socket.io Client -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
+
 <script>
-    // Auto-refresh every 5 seconds until complete
+    const socket = io();
+    const runId = {{ run.id }};
+    const roomName = "bulk_" + runId;
+
+    socket.on('connect', () => {
+        console.log("Connected to WebSocket");
+        socket.emit('join', { room: roomName });
+    });
+
+    socket.on('bulk_progress', (data) => {
+        console.log("Progress Update:", data);
+        if (data.run_id == runId) {
+            // Update percentage
+            const pct = Math.round(data.percentage);
+            const progressBar = document.querySelector('.progress-bar');
+            progressBar.style.width = pct + '%';
+            progressBar.setAttribute('aria-valuenow', pct);
+            progressBar.innerText = pct + '%';
+
+            // Update status text
+            const statusMsg = document.getElementById('status-message');
+            if (statusMsg) statusMsg.innerText = data.message;
+
+            // Update processed count
+            const processedCount = document.getElementById('processed-count');
+            if (processedCount) processedCount.innerText = data.processed;
+
+            // If complete, redirect after a short delay
+            if (pct >= 100 || data.message.toLowerCase().includes('complete')) {
+                setTimeout(() => {
+                    window.location.reload();
+                }, 1500);
+            }
+        }
+    });
+
+    // Fallback: still refresh every 15s in case of WS failure
     setTimeout(function() {
         window.location.reload();
-    }, 5000);
+    }, 15000);
 </script>
 
 <style>
@@ -79,6 +118,9 @@
     }
     .background-scanning {
         background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+    }
+    .progress-bar {
+        transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
     }
 </style>
 {% endblock %}

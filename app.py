@@ -41,6 +41,7 @@ from email.mime.multipart import MIMEMultipart
 from flask import (Flask, render_template, redirect, url_for, request,
                    flash, jsonify, abort, session, Response, send_file, current_app)
 import threading
+from flask_socketio import SocketIO, emit
 from flask_login import (LoginManager, login_user, logout_user,
                          login_required, current_user)
 from flask_bcrypt import Bcrypt
@@ -61,6 +62,9 @@ app.config['UPLOAD_FOLDER'] = os.path.join(app.root_path, 'static', 'uploads')
 app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024  # 1 GB (bulk ZIP uploads)
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
+# Initialize SocketIO
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 # ── EMAIL CONFIG — set these in environment or replace with real values ───────
 # For Gmail: enable "App Passwords" and use that as MAIL_PASSWORD.
@@ -134,6 +138,44 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # ── Jinja filter used in reports.html: {{ sub.plagiarism_report|fromjson }} ──
 @app.template_filter('fromjson')
+def fromjson_filter(s):
+    return json.loads(s) if s else {}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VECTOR SEARCH & ML WARMUP helpers
+# ─────────────────────────────────────────────────────────────────────────────
+def add_to_vector_index(sub):
+    """Adds a submission to the FAISS index in a background thread."""
+    if not sub or not sub.text_content:
+        return
+    
+    def _task(s_id, text, t_hash):
+        with app.app_context():
+            try:
+                from vector_service import get_vector_service
+                vs = get_vector_service()
+                st_model = logic._get_st_model()
+                # Clean text before embedding (consistent with search)
+                cleaned = logic.clean_text(text)
+                if not cleaned: return
+                
+                emb = st_model.encode([cleaned], convert_to_numpy=True)[0]
+                vs.add_submission(s_id, emb, t_hash)
+                print(f"[VectorService] Indexed submission #{s_id}")
+            except Exception as e:
+                print(f"[VectorService] Indexing error: {e}")
+
+    threading.Thread(target=_task, args=(sub.id, sub.text_content, sub.content_hash), daemon=True).start()
+
+
+@app.before_request
+def warmup_once():
+    """Trigger model warmup on the first request if not already done."""
+    if not hasattr(app, '_models_warmed'):
+        app._models_warmed = True
+        print("[SCHOLARIS] Starting background model warmup...")
+        threading.Thread(target=logic.warmup_models, daemon=True).start()
 def fromjson_filter(value):
     if not value:
         return {}
@@ -1299,6 +1341,10 @@ def submit(assignment_id):
     db.session.add(new_sub)
     db.session.commit()
 
+    # --- VECTOR INDEXING ---
+    if final_status == 'accepted' and new_sub.text_content:
+        add_to_vector_index(new_sub)
+
     new_remaining = max(0, attempts_allowed - attempt_number)
 
     # Student-facing verdict (no scores, no matched names)
@@ -1340,6 +1386,11 @@ def manual_review(submission_id):
         sub.verdict              = sub.status
         sub.manual_review        = False
         db.session.commit()
+
+        # Update vector index if approved
+        if action == 'approved' and sub.text_content:
+            add_to_vector_index(sub)
+
         flash(f'Submission {action} successfully.', 'success')
         return redirect(url_for('view_reports', course_id=sub.course_id))
 
@@ -1391,6 +1442,18 @@ def run_bulk_check_task(app, run_id, temp_dir, assignment_id, course_id, current
             if not bulk_run: return
             bulk_run.status = 'processing'
             db.session.commit()
+            
+            # Helper to emit progress
+            def push_progress(pct, msg):
+                socketio.emit('bulk_progress', {
+                    'run_id': run_id,
+                    'percentage': pct,
+                    'message': msg,
+                    'processed': bulk_run.processed_count,
+                    'total': bulk_run.total_files
+                }, room=f"bulk_{run_id}")
+
+            push_progress(5, "Initializing analysis engine...")
             assignment = Assignment.query.get(assignment_id)
             allowed_types = [t.strip().lower() for t in (assignment.allowed_file_types or '').split(',') if t.strip()]
 
@@ -1412,6 +1475,8 @@ def run_bulk_check_task(app, run_id, temp_dir, assignment_id, course_id, current
                         except Exception as e:
                             print(f"[Bulk-BG] ZIP Extraction Error: {e}", flush=True)
 
+            push_progress(10, "Scanning files...")
+
             # Re-scan for full file list
             filtered_paths = []
             for root, _, files in os.walk(temp_dir):
@@ -1424,6 +1489,7 @@ def run_bulk_check_task(app, run_id, temp_dir, assignment_id, course_id, current
             bulk_run.total_files = len(filtered_paths)
             db.session.commit()
             print(f"[Bulk-BG] Task #{run_id} starting for {len(filtered_paths)} files...", flush=True)
+            push_progress(15, f"Extracted {len(filtered_paths)} files. Starting text extraction...")
 
             if not filtered_paths:
                 bulk_run.status = 'completed'; db.session.commit()
@@ -1513,6 +1579,8 @@ def run_bulk_check_task(app, run_id, temp_dir, assignment_id, course_id, current
                 except Exception as e:
                     print(f"[Bulk-BG] Embedding error: {e}", flush=True)
 
+            push_progress(80, "Running AI semantic analysis...")
+
             # --- Phase 4: Plagiarism checks ---
             results = []
             _threshold = assignment.similarity_threshold
@@ -1568,6 +1636,7 @@ def run_bulk_check_task(app, run_id, temp_dir, assignment_id, course_id, current
             bulk_run.rejected = sum(1 for r in results if r['verdict'] == 'rejected')
             bulk_run.manual_review = sum(1 for r in results if r['verdict'] == 'manual_review' or r['verdict'] == 'error')
             db.session.commit()
+            push_progress(100, "Analysis complete!")
             print(f"[Bulk-BG] Task #{run_id} finished in {elapsed}s", flush=True)
 
         except Exception as e:

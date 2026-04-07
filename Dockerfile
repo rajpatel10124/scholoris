@@ -54,11 +54,13 @@ RUN mkdir -p /app/static/uploads
 
 EXPOSE 5000
 
-# Run with Gunicorn (already in requirements.txt)
-# --workers: 2 × CPU + 1 is the standard formula; 3 is safe for a t3.small
+# Run with Gunicorn using Eventlet for real-time WebSockets
+# -w 1: Only 1 worker is recommended when loading heavy AI models to save memory
+# --timeout: High timeout to handle large bulk checks (60+ files)
 CMD ["gunicorn", \
+     "-k", "eventlet", \
      "--bind", "0.0.0.0:5000", \
-     "--workers", "2", \
+     "--workers", "1", \
      "--timeout", "3600", \
      "--log-level", "info", \
      "app:app"]

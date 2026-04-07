@@ -191,6 +191,93 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
+def strip_bibliography(text: str) -> str:
+    """
+    Finds common bibliography/reference headers and removes everything following them.
+    This prevents students from being penalized for properly citing sources.
+    """
+    if not text:
+        return ""
+    
+    # Common headers for references
+    patterns = [
+        r"\b(references|bibliography|works cited|sources|further reading|bibliography)\b",
+        r"\b(selected references|reference list)\b"
+    ]
+    
+    # We look for these headers occurring in the last 30% of the document
+    # to avoid false positives (e.g., if a student mentions "References" in the middle).
+    cutoff = int(len(text) * 0.7)
+    search_area = text[cutoff:]
+    
+    for p in patterns:
+        match = re.search(p, search_area, re.IGNORECASE)
+        if match:
+            # We found a reference section. Strip it.
+            return text[:cutoff + match.start()].strip()
+            
+    return text
+
+
+def translate_high_confidence(text: str, target_lang: str = 'en') -> str:
+    """
+    Detects language and translates if necessary.
+    Uses deep-translator for better stability and dependency compatibility.
+    """
+    if not text or len(text.split()) < 5:
+        return text
+
+    try:
+        from deep_translator import GoogleTranslator
+        # GoogleTranslator(source='auto') handles detection internally
+        translator = GoogleTranslator(source='auto', target=target_lang)
+        
+        # We only want to translate if it's actually a different language.
+        # deep-translator doesn't expose confidence directly, but we can 
+        # do a quick check or just attempt translation (it's safe).
+        translated = translator.translate(text)
+        
+        if translated and translated.strip().lower() != text.strip().lower():
+            print(f"[logic] Language translation performed.")
+            return translated
+    except Exception as e:
+        # If translation fails (e.g. offline or API limit), we just return 
+        # the original text so the pipeline doesn't crash.
+        print(f"[logic] Translation skipped/error: {e}")
+    return text
+
+
+def _extract_python_ast_nodes(code: str) -> str:
+    """
+    Normalizes Python code by extracting the AST (Abstract Syntax Tree) 
+    and converting it to a string of node types. This makes the check 
+    resistant to variable renaming.
+    """
+    import ast
+    try:
+        tree = ast.parse(code)
+        nodes = []
+        for node in ast.walk(tree):
+            nodes.append(type(node).__name__)
+        return " ".join(nodes)
+    except Exception:
+        return ""
+
+
+def compare_code_logic(code1: str, code2: str) -> float:
+    """
+    Higher-level code comparison using AST structures.
+    """
+    nodes1 = _extract_python_ast_nodes(code1)
+    nodes2 = _extract_python_ast_nodes(code2)
+    
+    if not nodes1 or not nodes2:
+        return 0.0
+        
+    return _fuzzy_ratio(nodes1, nodes2)
+
+
+
 def generate_hash(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
@@ -1065,6 +1152,12 @@ def extract_text(file_path: str, check_handwritten: bool = True) -> tuple:
     except Exception as e:
         print(f"[extract_text] {file_path}: {e}")
 
+    # --- ADVANCED PREPROCESSING ---
+    if text:
+        text = strip_bibliography(text)
+        text = translate_high_confidence(text)
+        text = clean_text(text) # Final cleanup after translation
+
     print(f"[extract_text] '{os.path.basename(file_path)}' → "
           f"{len(text.split())} words, conf={round(conf,1)}%")
     return text, content, file_hash, conf
@@ -1159,6 +1252,14 @@ def extract_text_bulk(file_path: str) -> tuple:
 
     except Exception as e:
         print(f"[extract_text_bulk] {file_path}: {e}")
+
+    # --- ADVANCED PREPROCESSING ---
+    if text:
+        text = strip_bibliography(text)
+        # Translation in bulk is expensive; we only do it if the user enabled it 
+        # (Assuming 'auto' for now or we could add a flag)
+        text = translate_high_confidence(text)
+        text = clean_text(text)
 
     print(f"[extract_text_bulk] '{os.path.basename(file_path)}' → "
           f"{len(text.split())} words, conf={round(conf,1)}%")
@@ -1431,7 +1532,35 @@ def peer_comparison(text: str, other_texts: list,
     curr_cleaned = clean_text(text)
     curr_emb     = (precomputed_embeddings or {}).get(curr_cleaned)
 
-    for other in other_texts:
+    # --- FAISS VECTOR FILTERING ($O(log n)$) ---
+    filtered_others = []
+    if not precomputed_embeddings and curr_cleaned:
+        try:
+            from vector_service import get_vector_service
+            vs = get_vector_service()
+            if vs.index and vs.index.ntotal > 10:
+                # 1. Get embedding for current text
+                st_model = _get_st_model()
+                curr_vec = st_model.encode([curr_cleaned], convert_to_numpy=True)[0]
+                
+                # 2. Search FAISS for top candidates
+                results = vs.search(curr_vec, top_k=20)
+                top_ids = {r['submission_id'] for r in results if r['score'] > 0.40}
+                
+                if top_ids:
+                    print(f"[peer_comparison] FAISS found {len(top_ids)} candidates. Filtering list.")
+                    # Only keep texts that FAISS identified as similar
+                    filtered_others = [s for s in other_texts if s.get('submission_id') in top_ids]
+                else:
+                    print("[peer_comparison] FAISS found no similar documents. Skipping deep analysis.")
+                    return best
+        except Exception as e:
+            print(f"[peer_comparison] FAISS error: {e}. Falling back to full loop.")
+
+    # Fallback to full list if FAISS wasn't used
+    targets = filtered_others if filtered_others else other_texts
+
+    for other in targets:
         ot = other.get("text", "")
         if not ot or len(ot.split()) < 10:
             continue
@@ -1653,7 +1782,28 @@ def _bulk_peer_comparison(text, other_submissions, precomputed_embeddings=None):
     curr_cl  = clean_text(text)
     curr_emb = (precomputed_embeddings or {}).get(curr_cl)
     all_matches = []
-    for other in other_submissions:
+
+    # --- FAISS VECTOR FILTERING ---
+    targets = other_submissions
+    if not precomputed_embeddings and curr_cl:
+        try:
+            from vector_service import get_vector_service
+            vs = get_vector_service()
+            if vs.index and vs.index.ntotal > 10:
+                # Reuse model from logic
+                st_model = _get_st_model()
+                curr_vec = st_model.encode([curr_cl], convert_to_numpy=True)[0]
+                results = vs.search(curr_vec, top_k=20)
+                top_ids = {r['submission_id'] for r in results if r['score'] > 0.40}
+                if top_ids:
+                    targets = [s for s in other_submissions if s.get('submission_id') in top_ids]
+                else:
+                    # No similar documents in index
+                    return best
+        except Exception as e:
+            print(f"[_bulk_peer_comparison] FAISS error: {e}")
+
+    for other in targets:
         ot = other.get('text', '')
         if not ot or len(ot.split()) < 10:
             continue
