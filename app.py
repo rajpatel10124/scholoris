@@ -66,6 +66,14 @@ app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024  # 1 GB (bulk ZIP uploads)
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
+# ── EXTENSIONS ────────────────────────────────────────────────────────────────
+db.init_app(app)
+bcrypt = Bcrypt(app)
+login_mgr = LoginManager(app)
+login_mgr.login_view = 'login'
+login_mgr.login_message = 'Please log in to continue.'
+login_mgr.login_message_category = 'warning'
+
 # Initialize SocketIO with Redis Message Queue for Production Scaling
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://redis:6379/0')
 socketio = SocketIO(app, 
@@ -173,13 +181,6 @@ OTP_RESEND_DELAY = 60    # prevent email spam
 OTP_MAX_ATTEMPTS = 3     # brute-force protection
 
 
-# ── EXTENSIONS ────────────────────────────────────────────────────────────────
-db.init_app(app)
-bcrypt = Bcrypt(app)
-login_mgr = LoginManager(app)
-login_mgr.login_view = 'login'
-login_mgr.login_message = 'Please log in to continue.'
-login_mgr.login_message_category = 'warning'
 
 # --- GLOBAL SELF-HEALING DB SYNC (DIRECT-ACCESS) ---
 with app.app_context():
@@ -204,12 +205,6 @@ with app.app_context():
     except Exception as e:
         print(f"[DB] Global Sync (Direct) Error: {e}")
 
-bcrypt = Bcrypt(app)
-
-login_mgr = LoginManager(app)
-login_mgr.login_view = 'login'
-login_mgr.login_message = 'Please log in to continue.'
-login_mgr.login_message_category = 'warning'
 
 from flask_mail import Mail
 mail = Mail(app)
@@ -287,15 +282,6 @@ def _send_otp_email(to_email: str, otp: str, username: str) -> bool:
         return False
 
 
-# ── Jinja filter used in reports.html: {{ sub.plagiarism_report|fromjson }} ──
-@app.template_filter('fromjson')
-def fromjson_filter(value):
-    if not value:
-        return {}   
-    try:
-        return json.loads(value)
-    except Exception:
-        return {}
 
 import re
 

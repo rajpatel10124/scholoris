@@ -114,16 +114,14 @@ except ImportError:
     _HAS_DOCX = False
 
 # ── Similarity / ML (Lazy Loading for 'Instant Wake-up') ──────────────────────
-_ST_MODEL = None
-_TFIDF    = None
 
 def _get_st_model():
-    global _ST_MODEL
-    if _ST_MODEL is None:
+    global _st_model
+    if _st_model is None:
         print("[logic] Loading SentenceTransformer (mpnet-base-v2)...")
         from sentence_transformers import SentenceTransformer
-        _ST_MODEL = SentenceTransformer('all-mpnet-base-v2')
-    return _ST_MODEL
+        _st_model = SentenceTransformer('all-mpnet-base-v2')
+    return _st_model
 
 def _get_tfidf_vectorizer():
     global _TFIDF
