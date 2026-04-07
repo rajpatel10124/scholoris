@@ -43,6 +43,8 @@ from flask import (Flask, render_template, redirect, url_for, request,
                    flash, jsonify, abort, session, Response, send_file, current_app)
 import threading
 from flask_socketio import SocketIO, emit
+import redis
+import pickle
 from flask_login import (LoginManager, login_user, logout_user,
                          login_required, current_user)
 from flask_bcrypt import Bcrypt
@@ -64,10 +66,26 @@ app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024  # 1 GB (bulk ZIP uploads)
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-# Initialize SocketIO
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+# Initialize SocketIO with Redis Message Queue for Production Scaling
+REDIS_URL = os.environ.get('REDIS_URL', 'redis://redis:6379/0')
+socketio = SocketIO(app, 
+                  cors_allowed_origins="*", 
+                  async_mode='eventlet', 
+                  message_queue=REDIS_URL)
 
-# ── EMAIL CONFIG — set these in environment or replace with real values ───────
+# --- REDIS-BACKED PRODUCER-CONSUMER QUEUE ---
+r_conn = redis.from_url(REDIS_URL)
+
+def emit_progress(run_id, progress, message):
+    """Sends real-time updates through Redis to all listeners."""
+    socketio.emit('progress', {
+        'run_id': run_id,
+        'progress': progress,
+        'message': message
+    }, namespace='/')
+
+def run_bulk_check_task(run_id):
+# --- EMAIL CONFIG ---
 # For Gmail: enable "App Passwords" and use that as MAIL_PASSWORD.
 # Leave MAIL_SERVER blank to disable email (OTP printed to console instead).
 
@@ -140,7 +158,10 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 # ── Jinja filter used in reports.html: {{ sub.plagiarism_report|fromjson }} ──
 @app.template_filter('fromjson')
 def fromjson_filter(s):
-    return json.loads(s) if s else {}
+    try:
+        return json.loads(s) if s else {}
+    except:
+        return {}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2055,6 +2076,71 @@ def download_file(filepath):
 # =============================================================================
 # ENTRY POINT
 # =============================================================================
+# --- BULK CHECK RUN LOGIC ---
+def run_bulk_check_task(run_id):
+    """
+    Decoupled Producer-Consumer Task for m5.large (8GB RAM)
+    1. Producer: Handles parallelized OCR and text extraction.
+    2. Consumer: Runs FAISS Vector indexing and Cross-Encoder re-ranking.
+    """
+    with app.app_context():
+        run = BulkCheckRun.query.get(run_id)
+        if not run: return
+        
+        try:
+            emit_progress(run_id, 5, "Initializing Producer: OCR & Text Extraction Pool...")
+            
+            # Step 1: Text Extraction (Producer)
+            results = BulkCheckResult.query.filter_by(run_id=run_id).all()
+            total = len(results)
+            
+            for i, res in enumerate(results):
+                full_path = os.path.join(app.config['UPLOAD_FOLDER'], res.filename)
+                if os.path.exists(full_path):
+                    ext = res.filename.rsplit('.', 1)[-1].lower()
+                    # OCR for PDFs/Images
+                    if ext in ['png', 'jpg', 'jpeg', 'pdf']:
+                        res.extracted_text = logic.extract_text_all(full_path)
+                    else:
+                        with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            res.extracted_text = f.read()
+                
+                progress = 5 + int((i + 1) / total * 45)
+                emit_progress(run_id, progress, f"Processed {i+1}/{total}: {res.filename}")
+                db.session.commit()
+
+            # Step 2: Advanced ML Comparison (Consumer)
+            emit_progress(run_id, 55, "Initializing Consumer: High-Accuracy AI Analysis...")
+            
+            # Pre-load comparison candidates
+            other_subs = Submission.query.filter(Submission.text_content != None).all()
+            other_data = [{'submission_id': s.id, 'username': s.user.username, 'text': s.text_content} for s in other_subs]
+
+            for i, res in enumerate(results):
+                if not res.extracted_text: continue
+                
+                # Full analysis: Bi-Encoder -> FAISS -> Sliding Window -> Cross-Encoder
+                comparison = logic.peer_comparison(res.extracted_text, other_data)
+                
+                res.similarity_score = comparison['score']
+                res.matches_json = json.dumps(comparison.get('matches', []))
+                res.status = 'completed'
+                
+                progress = 55 + int((i + 1) / total * 40)
+                emit_progress(run_id, progress, f"Analyzed {i+1}/{total}: {res.filename}")
+                db.session.commit()
+
+            run.status = 'completed'
+            run.completed_at = datetime.datetime.utcnow()
+            db.session.commit()
+            emit_progress(run_id, 100, "Finalizing: Bulk check successful.")
+            
+        except Exception as e:
+            run.status = 'failed'
+            db.session.commit()
+            emit_progress(run_id, 0, f"Critical Error in Pipeline: {str(e)}")
+            print(f"[BulkCheck] Task error: {traceback.format_exc()}")
+
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()

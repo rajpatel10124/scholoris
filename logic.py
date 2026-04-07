@@ -219,6 +219,39 @@ def strip_bibliography(text: str) -> str:
     return text
 
 
+# --- ACADEMIC STOP PHRASES ---
+# Phrases that are common in academic writing and should NOT count towards plagiarism
+ACADEMIC_STOP_PHRASES = [
+    "in conclusion", "the results of this study", "further research is needed",
+    "as shown in figure", "the data suggest that", "it is important to note",
+    "in accordance with", "previous studies have shown", "in the present study",
+    "the purpose of this assignment", "based on the findings", "the following sections"
+]
+
+def _filter_academic_filler(text: str) -> str:
+    """Removes common academic filler phrases to reduce false positives."""
+    if not text: return ""
+    processed = text.lower()
+    for phrase in ACADEMIC_STOP_PHRASES:
+        processed = processed.replace(phrase.lower(), "")
+    return processed
+
+def _get_sliding_windows(text: str, window_size: int = 3, overlap: int = 1) -> list:
+    """Breaks text into overlapping sentence-based windows for micro-plagiarism detection."""
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    if len(sentences) <= window_size:
+        return [text]
+    
+    windows = []
+    step = window_size - overlap
+    for i in range(0, len(sentences), step):
+        window = " ".join(sentences[i : i + window_size])
+        if len(window.split()) > 10: # Ignore tiny windows
+            windows.append(window)
+        if i + window_size >= len(sentences):
+            break
+    return windows
+
 def translate_high_confidence(text: str, target_lang: str = 'en') -> str:
     """
     Detects language and translates if necessary.
@@ -1438,74 +1471,57 @@ def split_into_chunks(text: str, chunk_size: int = 200, overlap: int = 50) -> li
 
 
 def get_dynamic_weights(ocr_confidence: float) -> tuple:
-    """(w_semantic, w_structural, w_stylometric). Stylometric capped at 0.08."""
-    if ocr_confidence is None or ocr_confidence >= 95:
-        return 0.55, 0.37, 0.08
-    elif ocr_confidence >= 70:
-        return 0.65, 0.27, 0.08
-    else:
-        return 0.78, 0.14, 0.08
+    """
+    Adjust similarity weights based on OCR quality.
+    Lower confidence → trust semantic structure more than exact characters.
+    """
+    if ocr_confidence > 95:
+        return 0.50, 0.42, 0.08  # Standard: high semantic + structural
+    if ocr_confidence > 75:
+        return 0.65, 0.30, 0.05  # Moderate noise: trust meaning more
+    return 0.85, 0.12, 0.03      # Heavy noise: trust only deep semantic meaning
 
+def _get_ce_model():
+    global _cross_model
+    if _cross_model is None:
+        print("[logic] Loading Cross-Encoder (ms-marco-MiniLM)...")
+        from sentence_transformers import CrossEncoder
+        _cross_model = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+    return _cross_model
 
 def compute_fused_score(text1: str, text2: str,
                          ocr_conf: float = 100,
                          precomputed_embeddings: dict = None) -> tuple:
-    """Fuse semantic + structural + stylometric. No fuzzy floor."""
+    """
+    Fuses Semantic + Structural + Stylometric similarities.
+    Returns (fused_total, sem, stt, sty).
+    """
     sem = _semantic_similarity(text1, text2, precomputed_embeddings)
     stt = _structural_similarity(text1, text2)
     sty = _stylometric_similarity(text1, text2)
     w_sem, w_stt, w_sty = get_dynamic_weights(ocr_conf)
-    fused = sem*w_sem + stt*w_stt + sty*w_sty
-    if ocr_conf < 95:
-        fuzz  = _fuzzy_ratio(text1, text2)
-        fused = 0.75*fused + 0.25*fuzz  # light blend to handle OCR noise
+    
+    fused = sem * w_sem + stt * w_stt + sty * w_sty
     return round(fused, 4), sem, stt, sty
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MODEL WARMUP
-# ══════════════════════════════════════════════════════════════════════════════
-
 def warmup_models():
-    """
-    Pre-load ML similarity models at startup.
-
-    EasyOCR and PaddleOCR are intentionally NOT warmed up here:
-      - They are never used in the bulk plagiarism pipeline
-        (bulk uses Tesseract CLI subprocess instead)
-      - Each consumes 1.5–2 GB RAM; loading both at startup on a low-RAM
-        server is the primary cause of the OOM/SIGTERM that was crashing jobs
-      - They load lazily on first individual-file check if actually needed
-    """
-    if _HAS_ST:
-        try:
-            print("[warmup] SentenceTransformer…")
-            _get_st_model() # Lazy loading for 'Instant Wake-up'
-            print("[warmup] SentenceTransformer ready.")
-        except Exception as e:
-            print(f"[warmup] ST: {e}")
-
-    if _HAS_CROSS:
-        try:
-            print("[warmup] CrossEncoder…")
-            from sentence_transformers import CrossEncoder
-            _cross_model = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
-            print("[warmup] CrossEncoder ready.")
-        except Exception as e:
-            print(f"[warmup] CrossEncoder: {e}")
-
-    print("[warmup] Done. EasyOCR/PaddleOCR will load lazily if needed.")
-
+    """Pre-initialize models to avoid first-request latency."""
+    try:
+        _get_st_model()
+        _get_ce_model()
+        print("[logic] Models warmed up.")
+    except Exception as e:
+        print(f"[logic] Warmup error: {e}")
 
 def _cross_encoder_score(text1: str, text2: str) -> float:
     if not _HAS_CROSS: return 0.0
-    global _cross_model
     try:
-        if _cross_model is None:
-            _cross_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-        return float(1 / (1 + np.exp(-_cross_model.predict([(text1, text2)])[0])))
+        model = _get_ce_model()
+        # Scale 0-1 score
+        return float(model.predict([(text1, text2)])[0])
     except Exception as e:
-        print(f"[CrossEncoder] {e}"); return 0.0
+        print(f"[CrossEncoder] {e}")
+        return 0.0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
