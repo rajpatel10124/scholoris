@@ -43,8 +43,6 @@ from flask import (Flask, render_template, redirect, url_for, request,
                    flash, jsonify, abort, session, Response, send_file, current_app)
 import threading
 from flask_socketio import SocketIO, emit
-import redis
-import pickle
 from flask_login import (LoginManager, login_user, logout_user,
                          login_required, current_user)
 from flask_bcrypt import Bcrypt
@@ -66,47 +64,83 @@ app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024  # 1 GB (bulk ZIP uploads)
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-# ── EXTENSIONS ────────────────────────────────────────────────────────────────
-db.init_app(app)
-bcrypt = Bcrypt(app)
-login_mgr = LoginManager(app)
-login_mgr.login_view = 'login'
-login_mgr.login_message = 'Please log in to continue.'
-login_mgr.login_message_category = 'warning'
+# Initialize SocketIO
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
-# Initialize SocketIO with Redis Message Queue for Production Scaling
-REDIS_URL = os.environ.get('REDIS_URL', 'redis://redis:6379/0')
-socketio = SocketIO(app, 
-                  cors_allowed_origins="*", 
-                  async_mode='eventlet', 
-                  message_queue=REDIS_URL)
+# ── EMAIL CONFIG — set these in environment or replace with real values ───────
+# For Gmail: enable "App Passwords" and use that as MAIL_PASSWORD.
+# Leave MAIL_SERVER blank to disable email (OTP printed to console instead).
 
-# --- REDIS-BACKED PRODUCER-CONSUMER QUEUE ---
-r_conn = redis.from_url(REDIS_URL)
+# ENABLE_EMAIL_VERIFICATION = False  # If True, new users must verify their email with a 6-digit OTP before logging in.
 
-def emit_progress(run_id, progress, message):
-    """Sends real-time updates through Redis to all listeners."""
-    socketio.emit('progress', {
-        'run_id': run_id,
-        'progress': progress,
-        'message': message
-    }, namespace='/')
+# app.config['MAIL_SERVER']   = os.environ.get('MAIL_SERVER',   'smtp.gmail.com')
+# app.config['MAIL_PORT']     = int(os.environ.get('MAIL_PORT', 587))
+# app.config['MAIL_USE_TLS']  = True
+# app.config['MAIL_USERNAME'] = os.environ.get('MAIL_USERNAME', '')   # your@gmail.com
+# app.config['MAIL_PASSWORD'] = os.environ.get('MAIL_PASSWORD', '')   # app password
+# app.config['MAIL_FROM']     = os.environ.get('MAIL_FROM', 'noreply@scholaris.app')
+
+# # OTP TTL in seconds (10 minutes)
+# OTP_TTL = 600
+
+# db.init_app(app)
+# bcrypt      = Bcrypt(app)
+# login_mgr   = LoginManager(app)
+# login_mgr.login_view     = 'login'
+# login_mgr.login_message  = 'Please log in to continue.'
+# login_mgr.login_message_category = 'warning'
+
+# # ─────────────────────────────────────────────────────────────────────────────
+# # OTP HELPERS
+# # ─────────────────────────────────────────────────────────────────────────────
+# def _generate_otp() -> str:
+#     """Return a zero-padded 6-digit OTP string."""
+#     return f"{random.randint(0, 999999):06d}"
 
 
-# --- EMAIL CONFIG ---
+# def _send_otp_email(to_email: str, otp: str, username: str) -> bool:
+#     """
+#     Send OTP via SMTP. Returns True on success, False on failure.
+#     Falls back to console print when MAIL_USERNAME is not configured.
+#     """
+#     if not app.config.get('MAIL_USERNAME'):
+#         # Dev fallback — print to console so development works without email
+#         print(f"[OTP] {username} <{to_email}>: {otp}")
+#         return True
+#     try:
+#         msg = MIMEMultipart('alternative')
+#         msg['Subject'] = 'Your Scholaris Verification Code'
+#         msg['From']    = app.config['MAIL_FROM']
+#         msg['To']      = to_email
+
+#         html_body = f"""
+#         <div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px;">
+#           <h2 style="color:#0f0f11;margin-bottom:4px;">Verify your email</h2>
+#           <p style="color:#7a7a8a;">Hi {username}, use the code below to complete your registration.</p>
+#           <div style="background:#f5f5f7;border-radius:12px;padding:24px;text-align:center;margin:24px 0;">
+#             <span style="font-family:monospace;font-size:2.5rem;font-weight:700;letter-spacing:0.2em;color:#5b5ef4;">{otp}</span>
+#           </div>
+#           <p style="color:#7a7a8a;font-size:0.85rem;">This code expires in 10 minutes. If you did not sign up, ignore this email.</p>
+#         </div>
+#         """
+#         msg.attach(MIMEText(html_body, 'html'))
+
+#         with smtplib.SMTP(app.config['MAIL_SERVER'], app.config['MAIL_PORT']) as smtp:
+#             smtp.ehlo()
+#             if app.config['MAIL_USE_TLS']:
+#                 smtp.starttls()
+#             smtp.login(app.config['MAIL_USERNAME'], app.config['MAIL_PASSWORD'])
+#             smtp.sendmail(app.config['MAIL_FROM'], [to_email], msg.as_string())
+#         return True
+#     except Exception as e:
 #         print(f"[EMAIL ERROR] Could not send OTP to {to_email}: {e}")
 #         return False
 
 
-# ── Jinja filter used in reports.html ──
+# ── Jinja filter used in reports.html: {{ sub.plagiarism_report|fromjson }} ──
 @app.template_filter('fromjson')
 def fromjson_filter(s):
-    try:
-        if not s: return {}
-        if isinstance(s, (dict, list)): return s
-        return json.loads(s)
-    except:
-        return {}
+    return json.loads(s) if s else {}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -143,6 +177,13 @@ def warmup_once():
         app._models_warmed = True
         print("[SCHOLARIS] Starting background model warmup...")
         threading.Thread(target=logic.warmup_models, daemon=True).start()
+def fromjson_filter(value):
+    if not value:
+        return {}
+    try:
+        return json.loads(value)
+    except Exception:
+        return {}
 
 # import re
 
@@ -152,9 +193,9 @@ def warmup_once():
 #         return ""
 #     return re.sub(find, replace, s)
 
-@login_mgr.user_loader
-def load_user(user_id):
-    return db.session.get(User, int(user_id))
+# @login_mgr.user_loader
+# def load_user(user_id):
+#     return db.session.get(User, int(user_id))
 
 ENABLE_EMAIL_VERIFICATION = True   # OTP email verification active — set MAIL_USERNAME + MAIL_PASSWORD env vars
 
@@ -179,6 +220,8 @@ OTP_RESEND_DELAY = 60    # prevent email spam
 OTP_MAX_ATTEMPTS = 3     # brute-force protection
 
 
+# ── EXTENSIONS ────────────────────────────────────────────────────────────────
+db.init_app(app)
 
 # --- GLOBAL SELF-HEALING DB SYNC (DIRECT-ACCESS) ---
 with app.app_context():
@@ -203,6 +246,12 @@ with app.app_context():
     except Exception as e:
         print(f"[DB] Global Sync (Direct) Error: {e}")
 
+bcrypt = Bcrypt(app)
+
+login_mgr = LoginManager(app)
+login_mgr.login_view = 'login'
+login_mgr.login_message = 'Please log in to continue.'
+login_mgr.login_message_category = 'warning'
 
 from flask_mail import Mail
 mail = Mail(app)
@@ -280,6 +329,15 @@ def _send_otp_email(to_email: str, otp: str, username: str) -> bool:
         return False
 
 
+# ── Jinja filter used in reports.html: {{ sub.plagiarism_report|fromjson }} ──
+@app.template_filter('fromjson')
+def fromjson_filter(value):
+    if not value:
+        return {}   
+    try:
+        return json.loads(value)
+    except Exception:
+        return {}
 
 import re
 
@@ -1387,6 +1445,227 @@ def view_reports(course_id):
 
 
 
+# =============================================================================
+# FACULTY BULK PLAGIARISM CHECK (BACKGROUND TASK)
+# =============================================================================
+def run_bulk_check_task(app, run_id, temp_dir, assignment_id, course_id, current_user_id):
+    """Background task to run bulk plagiarism check."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from sqlalchemy.orm import joinedload
+
+    with app.app_context():
+        t0 = time.time()
+        try:
+            bulk_run = BulkCheckRun.query.get(run_id)
+            if not bulk_run: return
+            bulk_run.status = 'processing'
+            db.session.commit()
+            
+            # Helper to emit progress
+            def push_progress(pct, msg):
+                socketio.emit('bulk_progress', {
+                    'run_id': run_id,
+                    'percentage': pct,
+                    'message': msg,
+                    'processed': bulk_run.processed_count,
+                    'total': bulk_run.total_files
+                }, room=f"bulk_{run_id}")
+
+            push_progress(5, "Initializing analysis engine...")
+            assignment = Assignment.query.get(assignment_id)
+            allowed_types = [t.strip().lower() for t in (assignment.allowed_file_types or '').split(',') if t.strip()]
+
+            # --- Phase 0: Extraction (Moved to Background) ---
+            # Extract any ZIPS found in temp_dir
+            for root, _, fs in os.walk(temp_dir):
+                for f in fs:
+                    if f.lower().endswith('.zip'):
+                        zp = os.path.join(root, f)
+                        try:
+                            with zipfile.ZipFile(zp, 'r') as z:
+                                for member in z.namelist():
+                                    if member.endswith('/'): continue
+                                    dest = os.path.normpath(os.path.join(temp_dir, member))
+                                    if not dest.startswith(temp_dir): continue
+                                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                                    with z.open(member) as src, open(dest, 'wb') as dst: dst.write(src.read())
+                            os.remove(zp)
+                        except Exception as e:
+                            print(f"[Bulk-BG] ZIP Extraction Error: {e}", flush=True)
+
+            push_progress(10, "Scanning files...")
+
+            # Re-scan for full file list
+            filtered_paths = []
+            for root, _, files in os.walk(temp_dir):
+                for f in files:
+                    p = os.path.join(root, f)
+                    ext = f.rsplit('.', 1)[-1].lower() if '.' in f else ''
+                    if not allowed_types or ext in allowed_types:
+                        filtered_paths.append(p)
+            
+            bulk_run.total_files = len(filtered_paths)
+            db.session.commit()
+            print(f"[Bulk-BG] Task #{run_id} starting for {len(filtered_paths)} files...", flush=True)
+            push_progress(15, f"Extracted {len(filtered_paths)} files. Starting text extraction...")
+
+            if not filtered_paths:
+                bulk_run.status = 'completed'; db.session.commit()
+                return
+
+            # --- Phase 1: Text extraction ---
+            extracted = {}
+            def _extract_one(p):
+                return p, logic.extract_text_bulk(p)
+
+            _workers = min(2, len(filtered_paths))
+            with ThreadPoolExecutor(max_workers=_workers) as pool:
+                futures = {pool.submit(_extract_one, p): p for p in filtered_paths}
+                for fut in as_completed(futures):
+                    p_current = futures[fut]
+                    try:
+                        path, result = fut.result()
+                        extracted[path] = result
+                        bulk_run.processed_count += 1
+                        db.session.commit()
+                        print(f"   ↳ BG Prog: {bulk_run.processed_count}/{len(filtered_paths)} ({os.path.basename(path)})", flush=True)
+                    except Exception as e:
+                        print(f"   ↳ [ERROR] BG Extraction: {e}", flush=True)
+                        extracted[p_current] = ("", None, None, 0.0)
+                        bulk_run.processed_count += 1
+                        db.session.commit()
+
+            # --- Phase 2: Build submission lists ---
+            base_others = []
+            db_submissions = Submission.query.filter(
+                Submission.course_id == course_id,
+                Submission.assignment_id == assignment_id,
+                Submission.status == 'accepted'
+            ).all()
+            for sub in db_submissions:
+                if not sub.text_content: continue
+                orig_name = sub.filename or ''
+                try:
+                    m = json.loads(sub.files_metadata or '[]')
+                    if isinstance(m, list) and m:
+                        orig_name = m[0].get('originalName', orig_name)
+                except Exception: pass
+                base_others.append({
+                    'text': sub.text_content,
+                    'author_username': sub.author.username if sub.author else 'Unknown',
+                    'submission_id': sub.id,
+                    'filename': sub.filename or '',
+                    'original_filename': orig_name,
+                    '_unique_id': f'db_{sub.id}',
+                })
+
+            local_submissions = []
+            for p in filtered_paths:
+                txt, _, fhash, conf = extracted.get(p, ("", None, None, 0.0))
+                local_submissions.append({
+                    'text': txt, 'author_username': os.path.basename(p),
+                    'submission_id': None, 'filename': os.path.basename(p),
+                    'original_filename': os.path.basename(p),
+                    '_unique_id': f'local_{p}', '_path': p,
+                    '_file_hash': fhash, '_ocr_confidence': conf,
+                })
+            all_submissions = base_others + local_submissions
+
+            # --- Phase 3: Embeddings ---
+            precomputed_embeddings = None
+            if hasattr(logic, '_HAS_ST') and logic._HAS_ST:
+                try:
+                    st_model = logic._get_st_model() # Lazy loading for 'Instant Wake-up'
+                    unique_texts = []
+                    seen = set()
+                    for s in all_submissions:
+                        text = s.get('text')
+                        if not text: continue
+                        cl = logic.clean_text(text)
+                        if cl and cl not in seen:
+                            seen.add(cl); unique_texts.append(cl)
+                    if unique_texts:
+                        embeddings = st_model.encode(unique_texts, batch_size=16, convert_to_numpy=True).astype("float32")
+                        if hasattr(logic, '_HAS_FAISS') and logic._HAS_FAISS:
+                            import faiss as _faiss
+                            _faiss.normalize_L2(embeddings)
+                        else:
+                            import numpy as np
+                            norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+                            embeddings = embeddings / np.maximum(norms, 1e-10)
+                        precomputed_embeddings = {t: emb for t, emb in zip(unique_texts, embeddings)}
+                except Exception as e:
+                    print(f"[Bulk-BG] Embedding error: {e}", flush=True)
+
+            push_progress(80, "Running AI semantic analysis...")
+
+            # --- Phase 4: Plagiarism checks ---
+            results = []
+            _threshold = assignment.similarity_threshold
+            for lsub in local_submissions:
+                try:
+                    _path, _txt, _hash, _conf, _uid = lsub['_path'], lsub['text'], lsub['_file_hash'], lsub['_ocr_confidence'], lsub['_unique_id']
+                    _others = [s for s in all_submissions if s['_unique_id'] != _uid]
+                    _rep = logic.bulk_run_plagiarism_check_preextracted(
+                        text=_txt, file_hash=_hash, ocr_confidence=_conf or 100.0,
+                        other_submissions=_others, threshold=_threshold,
+                        precomputed_embeddings=precomputed_embeddings, filename=os.path.basename(_path),
+                    )
+                    if _hash:
+                        for s in _others:
+                            oh = s.get('_file_hash') or s.get('content_hash')
+                            if oh and oh == _hash:
+                                _rep['verdict'] = 'rejected'
+                                _rep['reason']  = f"Exact duplicate of {s['author_username']}"
+                                _rep['peer_score'] = 1.0; _rep['is_exact_duplicate'] = True
+                                break
+                    results.append({
+                        'filename': os.path.relpath(_path, temp_dir),
+                        'verdict': _rep.get('verdict', 'unknown'),
+                        'reason': _rep.get('reason', ''),
+                        'peer_score': round(_rep.get('peer_score', 0.0) * 100, 1),
+                        'external_score': _rep.get('external_score', 0.0),
+                        'ocr_confidence': _rep.get('ocr_confidence', 0.0),
+                        'analysis_text': _rep.get('analysis_text', ''),
+                        'peer_details': _rep.get('peer_details', {}),
+                    })
+                except Exception as e:
+                    results.append({
+                        'filename': os.path.basename(lsub.get('_path', '')),
+                        'verdict': 'error', 'reason': str(e),
+                        'peer_score': 0.0, 'external_score': 0.0, 'ocr_confidence': 0.0,
+                        'analysis_text': '', 'peer_details': {},
+                    })
+
+            # --- Phase 5: Finalize ---
+            elapsed = round(time.time() - t0, 1)
+            for row in results:
+                db.session.add(BulkCheckResult(
+                    run_id=run_id, filename=row['filename'],
+                    verdict=row['verdict'], reason=str(row['reason'])[:255],
+                    peer_score=row['peer_score'], external_score=row['external_score'],
+                    ocr_confidence=row['ocr_confidence'], analysis_text=row['analysis_text'],
+                    peer_details=json.dumps(row['peer_details']),
+                ))
+            
+            bulk_run.status = 'completed'
+            bulk_run.elapsed_sec = elapsed
+            bulk_run.accepted = sum(1 for r in results if r['verdict'] == 'accepted')
+            bulk_run.rejected = sum(1 for r in results if r['verdict'] == 'rejected')
+            bulk_run.manual_review = sum(1 for r in results if r['verdict'] == 'manual_review' or r['verdict'] == 'error')
+            db.session.commit()
+            push_progress(100, "Analysis complete!")
+            print(f"[Bulk-BG] Task #{run_id} finished in {elapsed}s", flush=True)
+
+        except Exception as e:
+            db.session.rollback()
+            try:
+                br = BulkCheckRun.query.get(run_id)
+                if br: br.status = 'error'; db.session.commit()
+            except: pass
+            print(f"[Bulk-BG] Task #{run_id} failed: {e}", flush=True)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 @app.route('/course/<int:course_id>/assignment/<int:assignment_id>/bulk_check', methods=['GET', 'POST'])
@@ -1420,7 +1699,7 @@ def bulk_check(course_id, assignment_id):
         db.session.add(bulk_run); db.session.commit()
 
         # Start Background Thread (Instant Start)
-        threading.Thread(target=run_bulk_check_task, args=(bulk_run.id,), daemon=True).start()
+        threading.Thread(target=run_bulk_check_task, args=(current_app._get_current_object(), bulk_run.id, temp_dir, assignment.id, course.id, current_user.id), daemon=True).start()
 
         return redirect(url_for('bulk_status', course_id=course_id, assignment_id=assignment_id, run_id=bulk_run.id))
 
@@ -1776,71 +2055,6 @@ def download_file(filepath):
 # =============================================================================
 # ENTRY POINT
 # =============================================================================
-# --- BULK CHECK RUN LOGIC ---
-def run_bulk_check_task(run_id):
-    """
-    Decoupled Producer-Consumer Task for m5.large (8GB RAM)
-    1. Producer: Handles parallelized OCR and text extraction.
-    2. Consumer: Runs FAISS Vector indexing and Cross-Encoder re-ranking.
-    """
-    with app.app_context():
-        run = BulkCheckRun.query.get(run_id)
-        if not run: return
-        
-        try:
-            emit_progress(run_id, 5, "Initializing Producer: OCR & Text Extraction Pool...")
-            
-            # Step 1: Text Extraction (Producer)
-            results = BulkCheckResult.query.filter_by(run_id=run_id).all()
-            total = len(results)
-            
-            for i, res in enumerate(results):
-                full_path = os.path.join(app.config['UPLOAD_FOLDER'], res.filename)
-                if os.path.exists(full_path):
-                    ext = res.filename.rsplit('.', 1)[-1].lower()
-                    # OCR for PDFs/Images
-                    if ext in ['png', 'jpg', 'jpeg', 'pdf']:
-                        res.extracted_text = logic.extract_text(full_path)[0]
-                    else:
-                        with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
-                            res.extracted_text = f.read()
-                
-                progress = 5 + int((i + 1) / total * 45)
-                emit_progress(run_id, progress, f"Processed {i+1}/{total}: {res.filename}")
-                db.session.commit()
-
-            # Step 2: Advanced ML Comparison (Consumer)
-            emit_progress(run_id, 55, "Initializing Consumer: High-Accuracy AI Analysis...")
-            
-            # Pre-load comparison candidates
-            other_subs = Submission.query.filter(Submission.text_content != None).all()
-            other_data = [{'submission_id': s.id, 'username': s.user.username, 'text': s.text_content} for s in other_subs]
-
-            for i, res in enumerate(results):
-                if not res.extracted_text: continue
-                
-                # Full analysis: Bi-Encoder -> FAISS -> Sliding Window -> Cross-Encoder
-                comparison = logic.peer_comparison(res.extracted_text, other_data)
-                
-                res.similarity_score = comparison['score']
-                res.matches_json = json.dumps(comparison.get('matches', []))
-                res.status = 'completed'
-                
-                progress = 55 + int((i + 1) / total * 40)
-                emit_progress(run_id, progress, f"Analyzed {i+1}/{total}: {res.filename}")
-                db.session.commit()
-
-            run.status = 'completed'
-            run.completed_at = datetime.datetime.utcnow()
-            db.session.commit()
-            emit_progress(run_id, 100, "Finalizing: Bulk check successful.")
-            
-        except Exception as e:
-            run.status = 'failed'
-            db.session.commit()
-            emit_progress(run_id, 0, f"Critical Error in Pipeline: {str(e)}")
-            print(f"[BulkCheck] Task error: {traceback.format_exc()}")
-
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
