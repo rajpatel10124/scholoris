@@ -1354,10 +1354,16 @@ def submit(assignment_id):
         manual_review=manual_review,
         ocr_confidence=ocr_confidence if ocr_confidence < 100 else None,
         plagiarism_report=json.dumps(plagiarism_report_data) if plagiarism_report_data else None,
+        sentence_map=json.dumps(result.get('heatmap', [])),
         timestamp=_now(),
     )
     db.session.add(new_sub)
     db.session.commit()
+
+    # Reclaim RAM for production (m5.large)
+    try:
+        logic._offload_ai_model()
+    except: pass
 
     # --- VECTOR INDEXING ---
     if final_status == 'accepted' and new_sub.text_content:
@@ -1556,6 +1562,7 @@ def run_bulk_check_task(app, run_id, temp_dir, assignment_id, course_id, current
                     'submission_id': sub.id,
                     'filename': sub.filename or '',
                     'original_filename': orig_name,
+                    'content_hash': sub.content_hash,
                     '_unique_id': f'db_{sub.id}',
                 })
 
@@ -1571,11 +1578,16 @@ def run_bulk_check_task(app, run_id, temp_dir, assignment_id, course_id, current
                 })
             all_submissions = base_others + local_submissions
 
-            # --- Phase 3: Embeddings ---
-            precomputed_embeddings = None
+            # --- Phase 3: Bulk Metadata Pre-calculation (O(1) Heatmap Boost) ---
+            print(f"\n[Bulk-BG] PRE-CALCULATING METADATA FOR {len(all_submissions)} DOCUMENTS...", flush=True)
+            precomputed_embeddings = {}
+            bulk_hashes = set()
+            bulk_authors = {}
+
+            # 1. Semantic Embeddings (Vector)
             if hasattr(logic, '_HAS_ST') and logic._HAS_ST:
                 try:
-                    st_model = logic._get_st_model() # Lazy loading for 'Instant Wake-up'
+                    st_model = logic._get_st_model()
                     unique_texts = []
                     seen = set()
                     for s in all_submissions:
@@ -1585,6 +1597,7 @@ def run_bulk_check_task(app, run_id, temp_dir, assignment_id, course_id, current
                         if cl and cl not in seen:
                             seen.add(cl); unique_texts.append(cl)
                     if unique_texts:
+                        print(f"  ↳ Generating semantic embeddings...", flush=True)
                         embeddings = st_model.encode(unique_texts, batch_size=16, convert_to_numpy=True).astype("float32")
                         if hasattr(logic, '_HAS_FAISS') and logic._HAS_FAISS:
                             import faiss as _faiss
@@ -1595,22 +1608,52 @@ def run_bulk_check_task(app, run_id, temp_dir, assignment_id, course_id, current
                             embeddings = embeddings / np.maximum(norms, 1e-10)
                         precomputed_embeddings = {t: emb for t, emb in zip(unique_texts, embeddings)}
                 except Exception as e:
-                    print(f"[Bulk-BG] Embedding error: {e}", flush=True)
+                    print(f"  ↳ [ERROR] Embedding: {e}", flush=True)
+
+            # 2. Structural Fingerprints (Winnowing)
+            print(f"  ↳ Generating structural fingerprints (One-Pass)...", flush=True)
+            for s in all_submissions:
+                txt = s.get('text')
+                if not txt: continue
+                # We pre-calculate all fingerprints ONCE for the whole batch
+                fp = logic.get_winnowing_fingerprint(txt)
+                auth = s.get('author_username', 'Another Student')
+                for h in fp:
+                    bulk_hashes.add(h)
+                    if h not in bulk_authors:
+                        bulk_authors[h] = auth
+            
+            # Injecting into precomputed object to pass to logic engine
+            precomputed_embeddings['_bulk_hashes'] = bulk_hashes
+            precomputed_embeddings['_bulk_authors'] = bulk_authors
 
             push_progress(80, "Running AI semantic analysis...")
+            
+            # Pre-load AI model once
+            try:
+                logic._get_ai_detect_model()
+            except Exception as e:
+                print(f"[Bulk-BG] AI model pre-load failed: {e}")
 
-            # --- Phase 4: Plagiarism checks ---
+            # --- Phase 4: Fast Plagiarism Checks ---
             results = []
             _threshold = assignment.similarity_threshold
-            for lsub in local_submissions:
+            total_local = len(local_submissions)
+            
+            print(f"\n[Bulk-BG] STARTING FINAL ANALYSIS FOR {total_local} NEW FILES...", flush=True)
+            for i, lsub in enumerate(local_submissions):
                 try:
                     _path, _txt, _hash, _conf, _uid = lsub['_path'], lsub['text'], lsub['_file_hash'], lsub['_ocr_confidence'], lsub['_unique_id']
+                    f_name = os.path.basename(_path)
+                    print(f"  [{i+1}/{total_local}] Analyzing: {f_name}...", flush=True)
+                    
                     _others = [s for s in all_submissions if s['_unique_id'] != _uid]
                     _rep = logic.bulk_run_plagiarism_check_preextracted(
                         text=_txt, file_hash=_hash, ocr_confidence=_conf or 100.0,
                         other_submissions=_others, threshold=_threshold,
-                        precomputed_embeddings=precomputed_embeddings, filename=os.path.basename(_path),
+                        precomputed_embeddings=precomputed_embeddings, filename=f_name,
                     )
+                    # Exact hash check
                     if _hash:
                         for s in _others:
                             oh = s.get('_file_hash') or s.get('content_hash')
@@ -1619,7 +1662,9 @@ def run_bulk_check_task(app, run_id, temp_dir, assignment_id, course_id, current
                                 _rep['reason']  = f"Exact duplicate of {s['author_username']}"
                                 _rep['peer_score'] = 1.0; _rep['is_exact_duplicate'] = True
                                 break
+                    
                     results.append({
+                        'id': str(uuid.uuid4())[:8],
                         'filename': os.path.relpath(_path, temp_dir),
                         'verdict': _rep.get('verdict', 'unknown'),
                         'reason': _rep.get('reason', ''),
@@ -1628,6 +1673,7 @@ def run_bulk_check_task(app, run_id, temp_dir, assignment_id, course_id, current
                         'ocr_confidence': _rep.get('ocr_confidence', 0.0),
                         'analysis_text': _rep.get('analysis_text', ''),
                         'peer_details': _rep.get('peer_details', {}),
+                        'heatmap': _rep.get('heatmap', []),
                     })
                 except Exception as e:
                     results.append({
@@ -1635,6 +1681,7 @@ def run_bulk_check_task(app, run_id, temp_dir, assignment_id, course_id, current
                         'verdict': 'error', 'reason': str(e),
                         'peer_score': 0.0, 'external_score': 0.0, 'ocr_confidence': 0.0,
                         'analysis_text': '', 'peer_details': {},
+                        'heatmap': [],
                     })
 
             # --- Phase 5: Finalize ---
@@ -1644,8 +1691,10 @@ def run_bulk_check_task(app, run_id, temp_dir, assignment_id, course_id, current
                     run_id=run_id, filename=row['filename'],
                     verdict=row['verdict'], reason=str(row['reason'])[:255],
                     peer_score=row['peer_score'], external_score=row['external_score'],
-                    ocr_confidence=row['ocr_confidence'], analysis_text=row['analysis_text'],
+                    ocr_confidence=row['ocr_confidence'],
+                    analysis_text=row.get('analysis_text', ''), 
                     peer_details=json.dumps(row['peer_details']),
+                    sentence_map=json.dumps(row['heatmap'])
                 ))
             
             bulk_run.status = 'completed'
@@ -1665,6 +1714,10 @@ def run_bulk_check_task(app, run_id, temp_dir, assignment_id, course_id, current
             except: pass
             print(f"[Bulk-BG] Task #{run_id} failed: {e}", flush=True)
         finally:
+            # Reclaim RAM for production (m5.large)
+            try:
+                logic._offload_ai_model()
+            except: pass
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -1946,7 +1999,8 @@ def download_reports_excel(course_id):
     )
 
 
-# Full JSON report endpoint — faculty only
+# ── PLAGIARISM REPORTS & HEATMAPS ─────────────────────────────────────────────
+
 @app.route('/submission/<int:submission_id>/plagiarism_report')
 @login_required
 def plagiarism_report_json(submission_id):
@@ -1956,18 +2010,27 @@ def plagiarism_report_json(submission_id):
     if not sub.plagiarism_report:
         return jsonify({'error': 'No report available.'}), 404
     try:
-        report = json.loads(sub.plagiarism_report)
+        return Response(sub.plagiarism_report, mimetype='application/json')
     except Exception:
         return jsonify({'error': 'Report data corrupt.'}), 500
-    return jsonify({
-        'submission_id':  sub.id,
-        'student':        sub.author.username,
-        'attempt_number': sub.attempt_number,
-        'is_late':        sub.is_late,
-        'timestamp':      sub.timestamp.isoformat(),
-        'report':         report,
-    })
 
+@app.route('/submission/<int:submission_id>/heatmap')
+@login_required
+def submission_heatmap(submission_id):
+    sub = db.get_or_404(Submission, submission_id)
+    if current_user.role == 'student' and sub.user_id != current_user.id:
+        abort(403)
+    heatmap_data = json.loads(sub.sentence_map or '[]')
+    return render_template('heatmap_view.html', title=f"Heatmap: {sub.filename}", result=sub, heatmap=heatmap_data)
+
+@app.route('/course/<int:course_id>/assignment/<int:assignment_id>/bulk/result/<int:result_id>/heatmap')
+@login_required
+def bulk_result_heatmap(course_id, assignment_id, result_id):
+    if current_user.role != 'faculty':
+        abort(403)
+    result = db.get_or_404(BulkCheckResult, result_id)
+    heatmap_data = json.loads(result.sentence_map or '[]')
+    return render_template('heatmap_view.html', title=f"Bulk Heatmap: {result.filename}", course=result.run.course, assignment=result.run.assignment, result=result, heatmap=heatmap_data)
 
 # =============================================================================
 # GRADING  (faculty)
@@ -2069,4 +2132,4 @@ if __name__ == '__main__':
             logic.warmup_models()
         except Exception as e:
             print(f"[WARN] Model warmup failed (will load on first use): {e}")
-    app.run(debug=True, use_reloader=False)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=True, use_reloader=False)

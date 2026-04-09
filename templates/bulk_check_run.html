@@ -127,9 +127,15 @@
 
         <div class="result-footer">
           <div class="result-reason">{{ row.reason }}</div>
-          <button class="btn btn-sm btn-outline-secondary toggle-details" data-target="#rr-{{ row.id }}">
-            <i class="bi bi-chevron-down me-1"></i>Details
-          </button>
+          <div class="d-flex gap-1">
+            <a href="{{ url_for('bulk_result_heatmap', course_id=course.id, assignment_id=assignment.id, result_id=row.id) }}" 
+               class="btn btn-sm btn-outline-primary">
+              <i class="bi bi-map me-1"></i>Heatmap
+            </a>
+            <button class="btn btn-sm btn-outline-secondary toggle-details" data-target="#rr-{{ row.id }}">
+              <i class="bi bi-chevron-down me-1"></i>Details
+            </button>
+          </div>
         </div>
 
         {% if row.analysis_text %}

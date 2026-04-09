@@ -30,8 +30,9 @@ INSTALL ALL OCR ENGINES:
   apt install tesseract-ocr tesseract-ocr-eng
 """
 
-import os, re, gc, json, hashlib, math, string, difflib, tempfile
+import os, re, gc, json, hashlib, math, string, difflib, tempfile, time
 import numpy as np
+import xxhash
 from PIL import Image, ImageOps, ImageFilter, ImageEnhance
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -131,6 +132,34 @@ def _get_tfidf_vectorizer():
         from sklearn.feature_extraction.text import TfidfVectorizer
         _TFIDF = TfidfVectorizer(ngram_range=(1,2), max_features=5000)
     return _TFIDF
+
+# ── AI Detection (Layer 3) — Lazy Loading ────────────────────────────────────
+_AI_MODEL = None
+_AI_TOKENIZER = None
+
+def _get_ai_detect_model():
+    global _AI_MODEL, _AI_TOKENIZER
+    if _AI_MODEL is None:
+        print("[logic] Loading GPT-2 for Layer 3 AI Detection...")
+        # Production optimization: offload other models if RAM is tight
+        # (Though m5.large has 8GB, it's good practice)
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        import torch as _torch
+        try:
+            _AI_TOKENIZER = AutoTokenizer.from_pretrained("gpt2")
+            _AI_MODEL = AutoModelForCausalLM.from_pretrained("gpt2")
+            _AI_MODEL.eval()
+        except Exception as e:
+            print(f"[logic] AI Model Load Error: {e}")
+            return None, None
+    return _AI_MODEL, _AI_TOKENIZER
+
+def _offload_ai_model():
+    global _AI_MODEL, _AI_TOKENIZER
+    _AI_MODEL = None
+    _AI_TOKENIZER = None
+    import gc
+    gc.collect()
 
 def _lazy_nltk_init():
     global _HAS_NLTK_READY
@@ -309,6 +338,102 @@ def _fuzzy_ratio(a: str, b: str) -> float:
         except Exception:
             pass
     return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LAYER 1: DIGITAL FINGERPRINTING (WINNOWING)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def get_winnowing_fingerprint(text: str, k: int = 25, w: int = 15) -> set:
+    """
+    Winnowing algorithm for document fingerprinting (Layer 1).
+    k: noise threshold (gram size)
+    w: guarantee threshold (window size)
+    """
+    if not text: return set()
+    
+    # Normalise: lowercase alphanumeric only
+    clean = re.sub(r'[^a-z0-9]', '', text.lower())
+    if len(clean) < k: return set()
+    
+    # Generate rolling hashes of k-grams
+    hashes = [xxhash.xxh64(clean[i:i+k]).intdigest() for i in range(len(clean) - k + 1)]
+    
+    fingerprint = set()
+    if len(hashes) < w:
+        fingerprint.add(min(hashes))
+        return fingerprint
+        
+    for i in range(len(hashes) - w + 1):
+        window = hashes[i:i+w]
+        fingerprint.add(min(window))
+        
+    return fingerprint
+
+def calculate_jaccard_winnow(text1: str, text2: str) -> float:
+    fp1 = get_winnowing_fingerprint(text1)
+    fp2 = get_winnowing_fingerprint(text2)
+    if not fp1 or not fp2: return 0.0
+    return len(fp1 & fp2) / len(fp1 | fp2)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LAYER 3: AUTHORSHIP DNA (AI DETECTION)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def calculate_perplexity(text: str) -> float:
+    """
+    High Perplexity = Surprising/Messy (Human)
+    Low Perplexity  = Predictable (AI)
+    """
+    if not text or len(text.split()) < 5: return 0.0
+    model, tokenizer = _get_ai_detect_model()
+    if not model: return 0.0
+    
+    import torch as _torch
+    try:
+        inputs = tokenizer(text, return_tensors="pt")
+        with _torch.no_grad():
+            outputs = model(**inputs, labels=inputs["input_ids"])
+        return math.exp(outputs.loss.item())
+    except Exception as e:
+        print(f"[AI-Perplexity] {e}")
+        return 0.0
+
+def calculate_burstiness(text: str) -> float:
+    """Variance in sentence structure/length."""
+    sentences = _sent_tokenize(text)
+    if len(sentences) < 3: return 0.0
+    lengths = [len(s.split()) for s in sentences]
+    return float(np.std(lengths))
+
+def detect_ai_dna(text: str, threshold: float = 70.0) -> dict:
+    """
+    Layer 3 detection combining Perplexity and Burstiness.
+    Returns {is_ai, confidence, detail}.
+    """
+    sentences = _sent_tokenize(text)
+    if not sentences: return {"score": 0.0, "is_ai": False}
+    
+    # Total text perplexity
+    overall_perp = calculate_perplexity(text[:1024]) # limited for speed
+    burstiness   = calculate_burstiness(text)
+    
+    # Typical GPT-2 Small Perplexity for human is > 40-50
+    # AI is often < 15-20.
+    # Confidence calc (heuristic):
+    # - Low Perp + Low Burstiness = High AI Score
+    norm_perp = max(0, min(1, (overall_perp - 10) / 60)) # 0 (AI) to 1 (Human)
+    norm_burst = max(0, min(1, burstiness / 20))        # 0 (AI) to 1 (Human)
+    
+    ai_score = (1.0 - (0.7 * norm_perp + 0.3 * norm_burst)) * 100
+    
+    return {
+        "score": round(ai_score, 1),
+        "is_ai": ai_score >= threshold,
+        "perplexity": round(overall_perp, 1),
+        "burstiness": round(burstiness, 1)
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1468,6 +1593,22 @@ def compute_fused_score(text1: str, text2: str,
 
 def warmup_models():
     """
+    Production warmup to ensure all ML models are ready *before* first check.
+    Crucial on m5.large instances to prevent first-run timeouts.
+    Now includes GPT-2 download to avoid 2-minute hangs during student submissions.
+    """
+    print("[logic] Starting AI model warmup (this ensures fast response times)...")
+    try:
+        # Pre-download NLTK stuff
+        _lazy_nltk_init()
+        # Pre-download/Pre-load GPT-2 (Force first-run download now)
+        _get_ai_detect_model()
+        # Pre-load SentenceTransformer (Layer 2)
+        _get_st_model()
+        print("[logic] Model warmup complete. System is ready.")
+    except Exception as e:
+        print(f"[logic] Warmup error (ignorable): {e}")
+    """
     Pre-load ML similarity models at startup.
 
     EasyOCR and PaddleOCR are intentionally NOT warmed up here:
@@ -1704,6 +1845,81 @@ def generate_analysis_text(verdict, peer_score, external_score,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# HEATMAP & SENTENCE ANALYSIS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def generate_heatmap_data(text: str, other_submissions: list, 
+                          ai_threshold: float = 70.0, 
+                          fast_mode: bool = False,
+                          precomputed_hashes: set = None,
+                          precomputed_authors: dict = None,
+                          precomputed_ai: dict = None) -> list:
+    """
+    Main Heatmap generation logic. Sentence-by-sentence analysis using
+    Multi-Layered Architecture:
+      - Layer 1 (Red): Exact Winnowing / MinHash match.
+      - Layer 3 (Yellow): AI Perplexity (Threshold: 70%).
+      - Default (Green): Original.
+    """
+    sentences = _sent_tokenize(text)
+    if not sentences: return []
+    
+    # Pre-calculate Doc-level AI check (or use precomputed)
+    doc_ai = precomputed_ai or detect_ai_dna(text, threshold=ai_threshold)
+    
+    # PERFORMANCE OPTIMIZATION: Use precomputed hashes if available, otherwise build once
+    other_hashes = precomputed_hashes
+    other_authors = precomputed_authors
+    
+    if other_hashes is None:
+        other_hashes = set()
+        other_authors = {} # hash -> author
+        for other in other_submissions:
+            if not other.get('text'): continue
+            fp = get_winnowing_fingerprint(other['text'])
+            for h in fp:
+                other_hashes.add(h)
+                if h not in other_authors:
+                    other_authors[h] = other.get('author_username', 'Another Student')
+
+    heatmap = []
+    
+    for sent in sentences:
+        sent = sent.strip()
+        if not sent or len(sent.split()) < 3:
+            heatmap.append({"text": sent, "type": "green", "score": 0.0})
+            continue
+            
+        # A. Layer 1 (Red) — Fast Winnow Match (O(1) lookup now)
+        is_copied = False
+        matched_peer = None
+        
+        sent_fp = get_winnowing_fingerprint(sent)
+        for h in sent_fp:
+            if h in other_hashes:
+                is_copied = True
+                matched_peer = other_authors.get(h, 'Another Student')
+                break
+        
+        if is_copied:
+            heatmap.append({"text": sent, "type": "red", "score": 100.0, "detail": f"Matched with {matched_peer}"})
+            continue
+            
+        # B. Layer 3 (Yellow) — AI Perplexity check
+        # Skip in fast_mode (Bulk) to maintain production speed on m5.large
+        if not fast_mode and len(sent.split()) > 10 and doc_ai['score'] > 40:
+            perp = calculate_perplexity(sent)
+            if 0 < perp < 25:
+                heatmap.append({"text": sent, "type": "yellow", "score": 85.0, "detail": "AI-like patterns"})
+                continue
+                
+        # C. Default (Green) — Original
+        heatmap.append({"text": sent, "type": "green", "score": 0.0})
+        
+    return heatmap
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # FULL PIPELINE ENTRY POINTS
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1712,7 +1928,8 @@ def run_plagiarism_check(file_path: str, other_submissions: list,
                          check_handwritten: bool = True,
                          existing_hash: str = None,
                          precomputed_embeddings: dict = None,
-                         skip_cross_encoder: bool = False) -> dict:
+                         skip_cross_encoder: bool = False,
+                         fast_mode: bool = False) -> dict:
     """Full plagiarism pipeline. Never raises."""
     is_image = file_path.lower().endswith(
         (".png",".jpg",".jpeg",".tiff",".tif",".gif",".webp",".bmp"))
@@ -1721,15 +1938,29 @@ def run_plagiarism_check(file_path: str, other_submissions: list,
     text, content, file_hash, ocr_confidence = extract_text(
         file_path, check_handwritten=check_handwritten)
 
+    # ── AI Content Check (Layer 3) ────────────────────────────────────────────
+    # threshold 70% as requested
+    ai_result = detect_ai_dna(text, threshold=70.0)
+    
+    # ── Heatmap Metadata ──────────────────────────────────────────────────────
+    # Heatmap Metadata (PASS THROUGH OPTIMIZATIONS)
+    heatmap = generate_heatmap_data(
+        text, other_submissions, 
+        ai_threshold=70.0, 
+        fast_mode=fast_mode,
+        precomputed_ai=ai_result
+    )
+
     result = {
         "text": text, "file_hash": file_hash, "ocr_confidence": ocr_confidence,
-        "verdict": "accepted", "peer_score": 0.0, "external_score": 0.0,
-        "peer_details": {},
-        "external_details": {"overall_external_score": 0, "sources": []},
-        "analysis_text": "", "is_exact_duplicate": False, "reason": "Original Work",
+        "content_bytes": content, "verdict": "accepted", "reason": "Original Work",
+        "peer_score": 0.0, "external_score": ai_result['score'],
+        "peer_details": {}, "external_details": {"overall_external_score": ai_result['score'], "sources": []},
+        "is_exact_duplicate": False, "analysis_text": "",
+        "heatmap": heatmap,
     }
 
-    ocr_was_used = is_image or (is_pdf and ocr_confidence < 99.0)
+    ocr_was_used = is_image or (is_pdf and (ocr_confidence or 100) < 99.0)
 
     if not text or len(text.split()) < 3:
         result["verdict"]       = "manual_review"
@@ -1796,10 +2027,10 @@ def _bulk_peer_comparison(text, other_submissions, precomputed_embeddings=None):
                 results = vs.search(curr_vec, top_k=20)
                 top_ids = {r['submission_id'] for r in results if r['score'] > 0.40}
                 if top_ids:
-                    targets = [s for s in other_submissions if s.get('submission_id') in top_ids]
+                    targets = [s for s in other_submissions if s.get('submission_id') in top_ids or s.get('submission_id') is None]
                 else:
-                    # No similar documents in index
-                    return best
+                    # No similar documents in database index, but still check local files in the current batch
+                    targets = other_submissions
         except Exception as e:
             print(f"[_bulk_peer_comparison] FAISS error: {e}")
 
@@ -1851,12 +2082,13 @@ def bulk_run_plagiarism_check(file_path: str, other_submissions: list,
                               threshold: int = 40,
                               check_handwritten: bool = True,
                               precomputed_embeddings: dict = None) -> dict:
-    """Bulk optimised entry point — disables CrossEncoder for speed."""
+    """Bulk optimised entry point — disables CrossEncoder and AI sentence check for speed."""
     return run_plagiarism_check(
         file_path, other_submissions,
         threshold=threshold, check_handwritten=check_handwritten,
         precomputed_embeddings=precomputed_embeddings,
-        skip_cross_encoder=True)
+        skip_cross_encoder=True,
+        fast_mode=True)
 
 
 def bulk_run_plagiarism_check_preextracted(text: str, file_hash: str,
@@ -1874,27 +2106,30 @@ def bulk_run_plagiarism_check_preextracted(text: str, file_hash: str,
         (".png", ".jpg", ".jpeg", ".tiff", ".tif", ".gif", ".webp", ".bmp"))
     is_pdf = filename.lower().endswith(".pdf")
 
-    result = {
-        "text": text, "file_hash": file_hash, "ocr_confidence": ocr_confidence,
-        "verdict": "accepted", "peer_score": 0.0, "external_score": 0.0,
-        "peer_details": {},
-        "external_details": {"overall_external_score": 0, "sources": []},
-        "analysis_text": "", "is_exact_duplicate": False, "reason": "Original Work",
-    }
-
-    ocr_was_used = is_image or (is_pdf and (ocr_confidence or 100) < 99.0)
-
-    if not text or len(text.split()) < 3:
-        result["verdict"] = "manual_review"
-        result["reason"] = "Could not extract any readable text"
-        result["analysis_text"] = "No text extracted. Manual review required."
-        return result
-
     # Same pipeline as run_plagiarism_check — identical scoring
     ext = detect_external_sources(text)
-    ext_score = ext["overall_external_score"]
-    result["external_details"] = ext
-    result["external_score"] = ext_score
+    ai_res = detect_ai_dna(text, threshold=70.0)
+    ext_score = max(ext["overall_external_score"], ai_res["score"])
+    
+    ocr_was_used = is_image or (is_pdf and (ocr_confidence or 100) < 99.0)
+
+    # ── Heatmap Metadata (ONE-PASS OPTIMIZED) ──────────────────────────────────
+    heatmap = generate_heatmap_data(
+        text, other_submissions, 
+        ai_threshold=70.0, 
+        fast_mode=True,
+        precomputed_ai=ai_res,
+        precomputed_hashes=precomputed_embeddings.get('_bulk_hashes') if precomputed_embeddings else None,
+        precomputed_authors=precomputed_embeddings.get('_bulk_authors') if precomputed_embeddings else None
+    )
+
+    result = {
+        "text": text, "file_hash": file_hash, "ocr_confidence": ocr_confidence,
+        "verdict": "accepted", "peer_score": 0.0, "external_score": ext_score,
+        "peer_details": {}, "external_details": ext,
+        "analysis_text": "", "is_exact_duplicate": False, "reason": "Original Work",
+        "heatmap": heatmap,
+    }
 
     peer = _bulk_peer_comparison(text, other_submissions,
                                    precomputed_embeddings=precomputed_embeddings)
@@ -1902,17 +2137,33 @@ def bulk_run_plagiarism_check_preextracted(text: str, file_hash: str,
     result["peer_score"] = peer_score
     result["peer_details"] = peer
 
+    # --- VERDICT LOGIC + CONSISTENT REASON ---
     verdict = decide_verdict(peer_score, ext_score, threshold)
     result["verdict"] = verdict
+
+    author = peer.get("matched_author", "another student")
+    p_pct = round(peer_score * 100, 1)
 
     if verdict == "rejected":
         if ext_score >= threshold:
             result["reason"] = f"External source detected ({round(ext_score, 1)}%)"
         else:
-            author = peer.get("matched_author", "another student")
-            result["reason"] = f"High similarity with {author} ({round(peer_score * 100, 1)}%)"
+            result["reason"] = f"High similarity with {author} ({p_pct}%)"
+    elif verdict == "manual_review":
+        if ocr_confidence and ocr_confidence < 40:
+             result["reason"] = f"Low OCR Confidence ({round(ocr_confidence,1)}%)"
+        elif not text or len(text.split()) < 10:
+             result["reason"] = "Very short document/Empty text"
+        else:
+             result["reason"] = f"Review required: Match with {author} ({p_pct}%)"
     else:
-        result["reason"] = "Original Work"
+        # even if accepted, if score is > 20%, show the match
+        if peer_score > 0.20:
+            result["reason"] = f"Low-moderate similarity with {author} ({p_pct}%)"
+        elif ext_score > 20:
+             result["reason"] = f"External signals detected ({round(ext_score, 1)}%)"
+        else:
+            result["reason"] = "Original Work"
 
     result["analysis_text"] = generate_analysis_text(
         verdict, peer_score, ext_score, peer, ext,

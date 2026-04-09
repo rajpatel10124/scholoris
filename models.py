@@ -167,6 +167,7 @@ class Submission(db.Model):
 
     ocr_confidence    = db.Column(db.Float, nullable=True)
     plagiarism_report = db.Column(db.Text,  nullable=True)  # JSON
+    sentence_map      = db.Column(db.Text,  nullable=True)  # JSON heatmap data
 
     faculty_grade    = db.Column(db.Float, nullable=True)
     faculty_feedback = db.Column(db.Text,  nullable=True)
@@ -222,4 +223,5 @@ class BulkCheckResult(db.Model):
     external_score = db.Column(db.Float,  default=0.0)
     ocr_confidence = db.Column(db.Float,  default=0.0)
     analysis_text  = db.Column(db.Text,   nullable=True)
-    peer_details   = db.Column(db.Text,   nullable=True)   # JSON
+    peer_details   = db.Column(db.Text,   nullable=True)   # JSON
+    sentence_map   = db.Column(db.Text,   nullable=True)   # JSON heatmap data

@@ -75,6 +75,11 @@
                     <span style="font-size:0.85rem;">External Source</span>
                     <span class="font-mono fw-bold">{{ "%.1f"|format(report.external_score|default(0)) }}%</span>
                 </div>
+                <div class="signal-mini mt-2">
+                    <a href="{{ url_for('submission_heatmap', submission_id=submission.id) }}" class="btn btn-outline-primary btn-sm w-100">
+                        <i class="bi bi-map me-2"></i> View Plagiarism Heatmap
+                    </a>
+                </div>
                 {% if report.analysis_text %}
                 <div style="margin-top:12px;background:var(--surface);border-radius:var(--radius-sm);padding:12px;font-family:var(--font-mono);font-size:0.73rem;color:var(--ink-soft);white-space:pre-wrap;line-height:1.6;">{{ report.analysis_text }}</div>
                 {% endif %}

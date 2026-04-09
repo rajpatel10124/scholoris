@@ -1,0 +1,217 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }}{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <!-- Header Section -->
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+            <nav aria-label="breadcrumb">
+                <ol class="breadcrumb mb-1">
+                    <li class="breadcrumb-item"><a href="{{ url_for('index') }}">Dashboard</a></li>
+                    {% if course %}
+                    <li class="breadcrumb-item"><a href="{{ url_for('course_page', course_id=course.id) }}">{{ course.code }}</a></li>
+                    {% endif %}
+                    <li class="breadcrumb-item active">Heatmap Analysis</li>
+                </ol>
+            </nav>
+            <h1 class="h3 mb-0 fw-bold text-gradient">Plagiarism Heatmap</h1>
+            <p class="text-muted small mt-1">
+                <i class="fas fa-file-alt me-1"></i> {{ result.filename }} 
+                {% if result.verdict %}
+                <span class="badge rounded-pill ms-2 
+                    {% if result.verdict == 'accepted' %}bg-success-subtle text-success
+                    {% elif result.verdict == 'rejected' %}bg-danger-subtle text-danger
+                    {% else %}bg-warning-subtle text-warning{% endif %}">
+                    {{ result.verdict|upper }}
+                </span>
+                {% endif %}
+            </p>
+        </div>
+        <div class="d-flex gap-2">
+            <button class="btn btn-outline-secondary btn-sm" onclick="window.print()">
+                <i class="fas fa-print me-1"></i> Print
+            </button>
+            <button class="btn btn-primary btn-sm" onclick="window.history.back()">
+                <i class="fas fa-arrow-left me-1"></i> Back to Report
+            </button>
+        </div>
+    </div>
+
+    <div class="row g-4">
+        <!-- Main Content: The Heatmap -->
+        <div class="col-lg-8">
+            <div class="card border-0 shadow-sm rounded-4 overflow-hidden">
+                <div class="card-header bg-white py-3 border-bottom d-flex justify-content-between align-items-center">
+                    <h5 class="card-title mb-0 fw-semibold text-dark">Document View</h5>
+                    <div class="dropdown">
+                        <button class="btn btn-light btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown">
+                            <i class="fas fa-cog me-1"></i> Settings
+                        </button>
+                        <ul class="dropdown-menu dropdown-menu-end shadow-sm">
+                            <li><a class="dropdown-item" href="#" onclick="toggleLineNumbers()">Show Line Numbers</a></li>
+                            <li><hr class="dropdown-divider"></li>
+                            <li><a class="dropdown-item" href="#" onclick="adjustFontSize(1)">Increase Font Size</a></li>
+                            <li><a class="dropdown-item" href="#" onclick="adjustFontSize(-1)">Decrease Font Size</a></li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="card-body p-4 bg-light-subtle">
+                    <div id="heatmapContainer" class="heatmap-content fs-5 lh-lg" style="font-family: 'Inter', system-ui, sans-serif; white-space: pre-wrap;">
+                        {% for item in heatmap %}
+                            <span class="heatmap-word" 
+                                  data-type="{{ item.type }}" 
+                                  data-score="{{ item.score }}"
+                                  data-detail="{{ item.detail }}"
+                                  style="cursor: help; {% if item.type == 'red' %}background-color: rgba(220, 53, 69, 0.15); border-bottom: 2px solid #dc3545;{% elif item.type == 'yellow' %}background-color: rgba(255, 193, 7, 0.2); border-bottom: 2px solid #ffc107;{% endif %}"
+                                  onclick="showDetail(this)">{{ item.text }} </span>
+                        {% endfor %}
+                    </div>
+                    {% if not heatmap %}
+                        <div class="text-center py-5">
+                            <i class="fas fa-ghost fa-3x text-light mb-3"></i>
+                            <p class="text-muted">No heatmap data available for this document.</p>
+                        </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <!-- Sidebar: Legend & Details -->
+        <div class="col-lg-4">
+            <!-- Legend Card -->
+            <div class="card border-0 shadow-sm rounded-4 mb-4">
+                <div class="card-body p-4">
+                    <h6 class="fw-bold mb-3">Analysis Legend</h6>
+                    <div class="d-flex align-items-center mb-3 p-3 rounded-3 bg-danger-subtle border-start border-4 border-danger">
+                        <div class="me-3"><i class="fas fa-copy text-danger"></i></div>
+                        <div>
+                            <div class="fw-bold text-danger">Plagiarized (Red)</div>
+                            <div class="small text-danger-emphasis opacity-75">Exact or high similarity with peer documents.</div>
+                        </div>
+                    </div>
+                    <div class="d-flex align-items-center mb-3 p-3 rounded-3 bg-warning-subtle border-start border-4 border-warning">
+                        <div class="me-3"><i class="fas fa-robot text-warning"></i></div>
+                        <div>
+                            <div class="fw-bold text-warning-emphasis">AI Generated (Yellow)</div>
+                            <div class="small text-warning-emphasis opacity-75">Predictive patterns consistent with LLM output.</div>
+                        </div>
+                    </div>
+                    <div class="d-flex align-items-center p-3 rounded-3 bg-success-subtle border-start border-4 border-success">
+                        <div class="me-3"><i class="fas fa-user-check text-success"></i></div>
+                        <div>
+                            <div class="fw-bold text-success">Original (Green)</div>
+                            <div class="small text-success-emphasis opacity-75">Natural human writing variability detected.</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Detail Panel -->
+            <div id="detailPanel" class="card border-0 shadow-sm rounded-4 sticky-top" style="top: 20px; display: none;">
+                <div class="card-header bg-white py-3 border-bottom d-flex justify-content-between align-items-center">
+                    <h6 class="mb-0 fw-bold">Sentence Detail</h6>
+                    <button type="button" class="btn-close btn-sm" onclick="hideDetail()"></button>
+                </div>
+                <div class="card-body p-4 text-center">
+                    <div id="detailIcon" class="mb-3"></div>
+                    <h5 id="detailTitle" class="fw-bold">AI Pattern Detected</h5>
+                    <div id="detailScore" class="mb-3">
+                        <span class="fs-1 fw-bold">85</span><span class="fs-5 text-muted">%</span>
+                        <div class="text-muted small">Confidence Score</div>
+                    </div>
+                    <p id="detailDesc" class="text-muted"></p>
+                    <hr>
+                    <div class="text-start">
+                        <small class="text-muted text-uppercase fw-bold ls-1 d-block mb-1">Sentence Context:</small>
+                        <blockquote id="detailContext" class="bg-light p-3 rounded-3 border-start border-3 border-secondary fst-italic mb-0"></blockquote>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+    .text-gradient {
+        background: linear-gradient(45deg, #2b32b2, #1488cc);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+    }
+    .ls-1 { letter-spacing: 0.5px; }
+    .heatmap-word {
+        transition: all 0.2s ease;
+        padding: 2px 0;
+        border-radius: 2px;
+    }
+    .heatmap-word:hover {
+        background-color: rgba(0,0,0,0.05) !important;
+        box-shadow: 0 0 0 2px rgba(0,0,0,0.1);
+    }
+    .heatmap-word.active {
+        box-shadow: 0 0 0 3px rgba(13, 110, 253, 0.5) !important;
+        z-index: 10;
+        position: relative;
+    }
+    @media print {
+        .btn, .breadcrumb, .card-header, .col-lg-4 { display: none !important; }
+        .col-lg-8 { width: 100% !important; }
+        .card { box-shadow: none !important; border: 0 !important; }
+    }
+</style>
+
+<script>
+    function showDetail(el) {
+        const type = el.dataset.type;
+        const score = el.dataset.score;
+        const detail = el.dataset.detail;
+        const text = el.innerText;
+        
+        // UI reset
+        document.querySelectorAll('.heatmap-word').forEach(w => w.classList.remove('active'));
+        el.classList.add('active');
+        
+        const panel = document.getElementById('detailPanel');
+        const icon = document.getElementById('detailIcon');
+        const title = document.getElementById('detailTitle');
+        const scoreEl = document.getElementById('detailScore').querySelector('.fs-1');
+        const desc = document.getElementById('detailDesc');
+        const ctx = document.getElementById('detailContext');
+        
+        panel.style.display = 'block';
+        ctx.innerText = text;
+        scoreEl.innerText = Math.round(score);
+        
+        if (type === 'red') {
+            icon.innerHTML = '<i class="fas fa-exclamation-triangle fa-3x text-danger"></i>';
+            title.innerText = "Plagiarism Detected";
+            title.className = "fw-bold text-danger";
+            desc.innerText = detail || "This sentence matches content found in another student's submission.";
+        } else if (type === 'yellow') {
+            icon.innerHTML = '<i class="fas fa-robot fa-3x text-warning"></i>';
+            title.innerText = "AI Generated Content";
+            title.className = "fw-bold text-warning-emphasis";
+            desc.innerText = detail || "Sentence structure and predictability scores suggest AI tool usage.";
+        } else {
+            icon.innerHTML = '<i class="fas fa-check-circle fa-3x text-success"></i>';
+            title.innerText = "Original Content";
+            title.className = "fw-bold text-success";
+            desc.innerText = "No significant matches or AI patterns found. Looks like original writing.";
+            scoreEl.innerText = "0";
+        }
+    }
+
+    function hideDetail() {
+        document.getElementById('detailPanel').style.display = 'none';
+        document.querySelectorAll('.heatmap-word').forEach(w => w.classList.remove('active'));
+    }
+
+    function adjustFontSize(dir) {
+        const el = document.getElementById('heatmapContainer');
+        const current = window.getComputedStyle(el).fontSize;
+        const newSize = (parseInt(current) + (dir * 2)) + 'px';
+        el.style.fontSize = newSize;
+    }
+</script>
+{% endblock %}
